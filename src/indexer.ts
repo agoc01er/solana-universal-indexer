@@ -3,6 +3,7 @@ import {
   PublicKey,
   ConfirmedSignatureInfo,
   ParsedTransactionWithMeta,
+  AccountInfo,
 } from '@solana/web3.js';
 import Database from 'better-sqlite3';
 import { config } from './config';
@@ -12,6 +13,9 @@ import {
   AnchorIdl,
   generateSchemaSQL,
   getInstructionTableName,
+  getAccountTableName,
+  buildDiscriminatorMap,
+  matchInstruction,
   decodeInstructionArgs,
 } from './idl';
 
@@ -21,8 +25,6 @@ export interface IndexerOptions {
   db: Database.Database;
   rpcUrl?: string;
 }
-
-export type IndexerMode = 'batch' | 'realtime';
 
 export interface BatchOptions {
   fromSlot?: number;
@@ -37,14 +39,15 @@ export class SolanaIndexer {
   private programId: PublicKey;
   private running = false;
   private shutdownRequested = false;
+  private discriminatorMap: Map<string, any>;
 
   constructor(opts: IndexerOptions) {
     this.connection = new Connection(opts.rpcUrl ?? config.RPC_URL, 'confirmed');
     this.db = opts.db;
     this.idl = opts.idl;
     this.programId = new PublicKey(opts.programId);
+    this.discriminatorMap = buildDiscriminatorMap(opts.idl);
 
-    // Initialize schema from IDL
     const ddl = generateSchemaSQL(opts.idl);
     this.db.exec(ddl);
 
@@ -55,7 +58,7 @@ export class SolanaIndexer {
     });
   }
 
-  // ─── State management ────────────────────────────────────────────────────────
+  // ─── State ───────────────────────────────────────────────────────────────────
 
   private getState(key: string): string | null {
     const row = this.db.prepare('SELECT value FROM _indexer_state WHERE key = ?').get(key) as any;
@@ -63,9 +66,8 @@ export class SolanaIndexer {
   }
 
   private setState(key: string, value: string) {
-    this.db.prepare(
-      'INSERT OR REPLACE INTO _indexer_state (key, value) VALUES (?, ?)'
-    ).run(key, value);
+    this.db.prepare('INSERT OR REPLACE INTO _indexer_state (key, value) VALUES (?, ?)')
+      .run(key, value);
   }
 
   private getLastProcessedSlot(): number {
@@ -77,9 +79,9 @@ export class SolanaIndexer {
     this.setState('last_processed_slot', String(slot));
   }
 
-  // ─── Transaction processing ───────────────────────────────────────────────
+  // ─── RPC helpers ─────────────────────────────────────────────────────────────
 
-  private async fetchTx(signature: string): Promise<ParsedTransactionWithMeta | null> {
+  private fetchTx(signature: string): Promise<ParsedTransactionWithMeta | null> {
     return withRetry(
       () => this.connection.getParsedTransaction(signature, {
         maxSupportedTransactionVersion: 0,
@@ -89,49 +91,74 @@ export class SolanaIndexer {
     );
   }
 
-  private async fetchSignatures(before?: string, limit = 100): Promise<ConfirmedSignatureInfo[]> {
+  private fetchSignatures(opts: { before?: string; until?: string; limit?: number } = {}): Promise<ConfirmedSignatureInfo[]> {
     return withRetry(
       () => this.connection.getSignaturesForAddress(
         this.programId,
-        { before, limit },
+        { before: opts.before, until: opts.until, limit: opts.limit ?? 100 },
         'confirmed'
       ),
       { maxAttempts: 5, initialDelayMs: 500 }
     );
   }
 
-  private processTx(tx: ParsedTransactionWithMeta, signature: string) {
+  private fetchAccountInfo(pubkey: PublicKey): Promise<AccountInfo<Buffer> | null> {
+    return withRetry(
+      () => this.connection.getAccountInfo(pubkey),
+      { maxAttempts: 3, initialDelayMs: 500 }
+    );
+  }
+
+  // ─── Transaction processing ───────────────────────────────────────────────
+
+  /**
+   * Process a single parsed transaction.
+   * Uses discriminator matching to correctly identify which instruction was called.
+   * All DB writes happen in a single transaction for atomicity.
+   */
+  private processTx(tx: ParsedTransactionWithMeta, signature: string): void {
     if (!tx.meta || tx.meta.err) return;
 
     const slot = tx.slot;
     const blockTime = tx.blockTime ?? null;
     const message = tx.transaction.message as any;
-    const instructions = message.instructions ?? [];
+    const instructions: any[] = message.instructions ?? [];
+    const accountKeys: any[] = message.accountKeys ?? [];
 
-    for (const ix of instructions) {
-      const programId = ix.programId?.toString();
-      if (programId !== this.programId.toString()) continue;
+    const insertFn = this.db.transaction(() => {
+      for (const ix of instructions) {
+        // Only process instructions for our program
+        if (ix.programId?.toString() !== this.programId.toString()) continue;
 
-      // Match instruction by discriminator or name
-      const rawData = ix.data ? Buffer.from(ix.data, 'base64') : null;
+        // Decode raw data
+        const rawData: Buffer | null = ix.data
+          ? Buffer.from(ix.data, 'base64')
+          : null;
 
-      for (const idlIx of this.idl.instructions) {
+        if (!rawData) continue;
+
+        // Match by Anchor discriminator
+        const idlIx = matchInstruction(rawData, this.discriminatorMap);
+        if (!idlIx) {
+          logger.debug('Unknown instruction discriminator', {
+            signature,
+            disc: rawData.slice(0, 8).toString('hex'),
+          });
+          continue;
+        }
+
         const tableName = getInstructionTableName(this.idl.name, idlIx.name);
 
-        // Try to decode args
-        const args = rawData
-          ? decodeInstructionArgs(idlIx.args, new Uint8Array(rawData))
-          : {};
+        // Decode args
+        const args = decodeInstructionArgs(idlIx.args, rawData);
 
-        // Build accounts map
-        const accountKeys = message.accountKeys ?? [];
-        const accountValues: Record<string, string> = {};
+        // Map accounts by position
+        const accountValues: Record<string, string | null> = {};
         idlIx.accounts.forEach((acc, i) => {
           const key = accountKeys[i];
           accountValues[`account_${acc.name.toLowerCase()}`] = key?.pubkey?.toString() ?? null;
         });
 
-        // Build row
         const row: Record<string, any> = {
           signature,
           slot,
@@ -141,31 +168,69 @@ export class SolanaIndexer {
         };
 
         for (const field of idlIx.args) {
-          row[`arg_${field.name.toLowerCase()}`] = args[field.name] !== undefined
-            ? String(args[field.name])
-            : null;
+          const val = args[field.name];
+          row[`arg_${field.name.toLowerCase()}`] = val !== undefined && val !== null ? String(val) : null;
         }
 
         const cols = Object.keys(row);
         const placeholders = cols.map(() => '?').join(', ');
-        const values = cols.map(c => row[c]);
 
         try {
           this.db.prepare(
             `INSERT OR IGNORE INTO ${tableName} (${cols.join(', ')}) VALUES (${placeholders})`
-          ).run(...values);
-        } catch (err: any) {
-          logger.warn('Failed to insert row', { table: tableName, error: err.message });
-        }
+          ).run(...cols.map(c => row[c]));
 
-        // Only process first matching instruction per tx for now
-        break;
+          logger.debug('Indexed instruction', { instruction: idlIx.name, signature, slot });
+        } catch (err: any) {
+          logger.warn('Insert failed', { table: tableName, error: err.message, signature });
+        }
+      }
+
+      // Update checkpoint inside same transaction
+      if (slot > this.getLastProcessedSlot()) {
+        this.setLastProcessedSlot(slot);
+      }
+    });
+
+    insertFn();
+  }
+
+  /**
+   * Decode and store on-chain account state for a given account type.
+   */
+  async indexAccountState(pubkey: string, accountTypeName: string): Promise<void> {
+    const accDef = this.idl.accounts?.find(a => a.name === accountTypeName);
+    if (!accDef) throw new Error(`Account type '${accountTypeName}' not in IDL`);
+
+    const accountInfo = await this.fetchAccountInfo(new PublicKey(pubkey));
+    if (!accountInfo) {
+      logger.warn('Account not found', { pubkey });
+      return;
+    }
+
+    const tableName = getAccountTableName(this.idl.name, accDef.name);
+    const data = Buffer.from(accountInfo.data);
+
+    // Decode fields (skip 8-byte Anchor account discriminator)
+    const row: Record<string, any> = { pubkey, slot: 0, updated_at: Date.now() };
+    let offset = 8;
+    for (const field of accDef.type.fields) {
+      try {
+        const { decodeField } = await import('./idl');
+        const [val, nextOffset] = decodeField(field.type, data, offset);
+        row[field.name.toLowerCase()] = val !== null ? String(val) : null;
+        offset = nextOffset;
+      } catch {
+        row[field.name.toLowerCase()] = null;
       }
     }
 
-    if (slot > this.getLastProcessedSlot()) {
-      this.setLastProcessedSlot(slot);
-    }
+    const cols = Object.keys(row);
+    this.db.prepare(
+      `INSERT OR REPLACE INTO ${tableName} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`
+    ).run(...cols.map(c => row[c]));
+
+    logger.info('Account state indexed', { pubkey, type: accountTypeName });
   }
 
   // ─── Batch mode ──────────────────────────────────────────────────────────────
@@ -175,34 +240,44 @@ export class SolanaIndexer {
     let processed = 0;
 
     if (opts.signatures?.length) {
-      // Process specific signatures
       for (const sig of opts.signatures) {
+        if (this.shutdownRequested) break;
         const tx = await this.fetchTx(sig);
         if (tx) { this.processTx(tx, sig); processed++; }
+        await sleep(50);
       }
+      logger.info('Batch complete (signatures)', { processed });
       return processed;
     }
 
-    // Paginate through signatures
+    // Paginate: getSignaturesForAddress returns newest first
     let before: string | undefined;
-    while (!this.shutdownRequested) {
-      const sigs = await this.fetchSignatures(before, 100);
-      if (!sigs.length) break;
 
-      for (const sigInfo of sigs) {
-        if (opts.fromSlot && sigInfo.slot < opts.fromSlot) { return processed; }
-        if (opts.toSlot && sigInfo.slot > opts.toSlot) continue;
+    while (!this.shutdownRequested) {
+      const page = await this.fetchSignatures({ before, limit: 100 });
+      if (!page.length) break;
+
+      for (const sigInfo of page) {
+        if (this.shutdownRequested) break;
+
+        // fromSlot check: signatures are newest-first, so stop when below fromSlot
+        if (opts.fromSlot !== undefined && sigInfo.slot < opts.fromSlot) {
+          logger.info('Reached fromSlot boundary', { slot: sigInfo.slot, fromSlot: opts.fromSlot });
+          return processed;
+        }
+        // toSlot check: skip if above toSlot
+        if (opts.toSlot !== undefined && sigInfo.slot > opts.toSlot) continue;
 
         const tx = await this.fetchTx(sigInfo.signature);
         if (tx) { this.processTx(tx, sigInfo.signature); processed++; }
-        await sleep(50); // rate limit
+        await sleep(50);
       }
 
-      before = sigs[sigs.length - 1].signature;
-      logger.info('Batch progress', { processed, lastSlot: sigs[sigs.length - 1].slot });
+      before = page[page.length - 1].signature;
+      logger.info('Batch progress', { processed, lastSlot: page[page.length - 1].slot });
     }
 
-    logger.info('Batch indexing complete', { processed });
+    logger.info('Batch complete', { processed });
     return processed;
   }
 
@@ -210,55 +285,65 @@ export class SolanaIndexer {
 
   async runRealtime(): Promise<void> {
     this.running = true;
-    logger.info('Starting real-time indexing with cold start');
+    logger.info('Starting real-time indexing');
 
-    // Cold start: backfill missed transactions
+    // Cold start: backfill from last checkpoint
     await this.backfill();
 
-    // Real-time polling
-    logger.info('Cold start complete, switching to real-time polling');
+    logger.info('Cold start complete, entering real-time polling');
     while (this.running && !this.shutdownRequested) {
       try {
         await this.pollNew();
       } catch (err: any) {
-        logger.error('Polling error', { error: err.message });
+        logger.error('Poll error', { error: err.message });
       }
       await sleep(config.POLL_INTERVAL_MS);
     }
   }
 
+  /**
+   * Backfill: fetch all signatures newer than last checkpoint, process oldest-first.
+   */
   private async backfill(): Promise<void> {
     const lastSlot = this.getLastProcessedSlot();
-    logger.info('Backfilling', { fromSlot: lastSlot });
-
-    let before: string | undefined;
+    logger.info('Backfilling from checkpoint', { lastSlot });
     let backfilled = 0;
 
+    // Collect all new sigs first, then process oldest-first
+    const allNewSigs: ConfirmedSignatureInfo[] = [];
+    let before: string | undefined;
+
     while (!this.shutdownRequested) {
-      const sigs = await this.fetchSignatures(before, 100);
-      if (!sigs.length) break;
+      const page = await this.fetchSignatures({ before, limit: 100 });
+      if (!page.length) break;
 
-      const newSigs = sigs.filter(s => s.slot > lastSlot);
-      if (!newSigs.length) break;
+      const newInPage = page.filter(s => s.slot > lastSlot);
+      allNewSigs.push(...newInPage);
 
-      for (const sigInfo of newSigs.reverse()) {
-        const tx = await this.fetchTx(sigInfo.signature);
-        if (tx) { this.processTx(tx, sigInfo.signature); backfilled++; }
-        await sleep(50);
-      }
-
-      if (newSigs.length < sigs.length) break;
-      before = sigs[sigs.length - 1].signature;
+      // Stop paginating when we hit already-seen slots
+      if (newInPage.length < page.length) break;
+      before = page[page.length - 1].signature;
     }
 
-    logger.info('Backfill complete', { backfilled });
+    // Process oldest first (reverse: getSignaturesForAddress returns newest first)
+    for (const sigInfo of allNewSigs.reverse()) {
+      if (this.shutdownRequested) break;
+      const tx = await this.fetchTx(sigInfo.signature);
+      if (tx) { this.processTx(tx, sigInfo.signature); backfilled++; }
+      await sleep(50);
+    }
+
+    logger.info('Backfill complete', { backfilled, nowAtSlot: this.getLastProcessedSlot() });
   }
 
+  /**
+   * Poll for transactions newer than our last checkpoint.
+   */
   private async pollNew(): Promise<void> {
-    const sigs = await this.fetchSignatures(undefined, 10);
     const lastSlot = this.getLastProcessedSlot();
+    const sigs = await this.fetchSignatures({ limit: 20 });
 
-    for (const sigInfo of sigs) {
+    for (const sigInfo of sigs.reverse()) { // process oldest first
       if (sigInfo.slot <= lastSlot) continue;
       const tx = await this.fetchTx(sigInfo.signature);
       if (tx) { this.processTx(tx, sigInfo.signature); }
@@ -267,7 +352,7 @@ export class SolanaIndexer {
 
   // ─── Shutdown ─────────────────────────────────────────────────────────────
 
-  stop() {
+  stop(): void {
     logger.info('Graceful shutdown requested');
     this.shutdownRequested = true;
     this.running = false;

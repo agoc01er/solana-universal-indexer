@@ -111,9 +111,9 @@ npm run dev
 | `RPC_URL` | mainnet-beta | Solana RPC endpoint |
 | `WS_URL` | auto | WebSocket URL (derived from RPC_URL if not set) |
 | `IDL_PATH` | `./idl.json` | Path to Anchor IDL JSON |
-| `DB_TYPE` | `sqlite` | `sqlite` or `postgres` |
-| `DB_PATH` | `./indexer.db` | SQLite path |
-| `DATABASE_URL` | — | PostgreSQL connection string |
+| `DB_TYPE` | `postgres` | `postgres` (production) or `sqlite` (dev/testing) |
+| `DATABASE_URL` | — | PostgreSQL connection string (**required** for postgres) |
+| `DB_PATH` | `./indexer.db` | SQLite path (only used when `DB_TYPE=sqlite`) |
 | `PORT` | `3000` | REST API port |
 | `MODE` | `realtime` | `realtime` or `batch` |
 | `POLL_INTERVAL_MS` | `5000` | Real-time polling interval |
@@ -222,12 +222,14 @@ Real Solana transactions contain nested CPI calls. We parse `tx.meta.innerInstru
 
 ## Architectural Decisions & Trade-offs
 
-### SQLite as default (not PostgreSQL)
-**Decision:** SQLite with WAL mode as default, PostgreSQL optional via `DB_TYPE=postgres`.
+### PostgreSQL as primary database
+**Decision:** PostgreSQL is the default production backend. SQLite is available for local development and testing via `DB_TYPE=sqlite`.
 
-**Rationale:** Zero-dependency setup. WAL mode enables concurrent reads. For most indexing workloads, SQLite handles 100M+ rows. The schema generation and query logic is database-agnostic — swapping to PostgreSQL is a single env var.
+**Rationale:** PostgreSQL provides concurrent writes, proper JSONB support, connection pooling, and production-grade reliability. The schema generation layer is database-agnostic — both backends share the same interface.
 
-**Trade-off:** SQLite has a single-writer lock. Under very high throughput, switch to PostgreSQL.
+**SQLite use case:** Zero-dependency local development, CI pipelines, edge deployments, and integration testing without a running PostgreSQL instance.
+
+**Trade-off:** PostgreSQL requires a running instance. For serverless or embedded scenarios, SQLite mode works out of the box.
 
 ### WebSocket + Polling hybrid
 **Decision:** Both simultaneously, not either/or.

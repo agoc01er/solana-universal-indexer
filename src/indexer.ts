@@ -1,123 +1,276 @@
-import { Connection, PublicKey, ParsedTransactionWithMeta, ConfirmedSignatureInfo } from '@solana/web3.js';
-import { SchemaManager, IndexSchema, FieldConfig } from './schema';
+import {
+  Connection,
+  PublicKey,
+  ConfirmedSignatureInfo,
+  ParsedTransactionWithMeta,
+} from '@solana/web3.js';
+import Database from 'better-sqlite3';
 import { config } from './config';
+import { logger } from './logger';
+import { withRetry, sleep } from './retry';
+import {
+  AnchorIdl,
+  generateSchemaSQL,
+  getInstructionTableName,
+  decodeInstructionArgs,
+} from './idl';
+
+export interface IndexerOptions {
+  idl: AnchorIdl;
+  programId: string;
+  db: Database.Database;
+  rpcUrl?: string;
+}
+
+export type IndexerMode = 'batch' | 'realtime';
+
+export interface BatchOptions {
+  fromSlot?: number;
+  toSlot?: number;
+  signatures?: string[];
+}
 
 export class SolanaIndexer {
   private connection: Connection;
-  private schemaManager: SchemaManager;
+  private db: Database.Database;
+  private idl: AnchorIdl;
+  private programId: PublicKey;
   private running = false;
-  private intervals: Map<string, NodeJS.Timeout> = new Map();
+  private shutdownRequested = false;
 
-  constructor(schemaManager: SchemaManager) {
-    this.connection = new Connection(config.RPC_URL, 'confirmed');
-    this.schemaManager = schemaManager;
+  constructor(opts: IndexerOptions) {
+    this.connection = new Connection(opts.rpcUrl ?? config.RPC_URL, 'confirmed');
+    this.db = opts.db;
+    this.idl = opts.idl;
+    this.programId = new PublicKey(opts.programId);
+
+    // Initialize schema from IDL
+    const ddl = generateSchemaSQL(opts.idl);
+    this.db.exec(ddl);
+
+    logger.info('Indexer initialized', {
+      program: opts.idl.name,
+      programId: opts.programId,
+      instructions: opts.idl.instructions.map(ix => ix.name),
+    });
   }
 
-  private extractField(tx: ParsedTransactionWithMeta, field: FieldConfig): any {
-    try {
-      const message = tx.transaction.message as any;
-      switch (field.source) {
-        case 'account': {
-          const accounts = message.accountKeys || [];
-          const parts = field.path.split('.');
-          const account = accounts[parseInt(parts[0])];
-          if (!account) return null;
-          if (parts[1] === 'pubkey') return account.pubkey?.toString();
-          if (parts[1] === 'signer') return account.signer;
-          if (parts[1] === 'writable') return account.writable;
-          return account.pubkey?.toString();
-        }
-        case 'instruction': {
-          const instructions = message.instructions || [];
-          const parts = field.path.split('.');
-          const ix = instructions[parseInt(parts[0])];
-          if (!ix) return null;
-          if (parts[1] === 'programId') return ix.programId?.toString();
-          if (parts[1] === 'data') return (ix as any).data;
-          return null;
-        }
-        case 'log': {
-          const logs = tx.meta?.logMessages || [];
-          return logs[parseInt(field.path)] || null;
-        }
-        case 'meta': {
-          if (field.path === 'fee') return tx.meta?.fee;
-          if (field.path === 'err') return tx.meta?.err ? JSON.stringify(tx.meta.err) : null;
-          if (field.path === 'computeUnitsConsumed') return tx.meta?.computeUnitsConsumed;
-          return null;
-        }
-        default: return null;
-      }
-    } catch { return null; }
+  // ─── State management ────────────────────────────────────────────────────────
+
+  private getState(key: string): string | null {
+    const row = this.db.prepare('SELECT value FROM _indexer_state WHERE key = ?').get(key) as any;
+    return row?.value ?? null;
   }
 
-  private matchesFilter(tx: ParsedTransactionWithMeta, schema: IndexSchema): boolean {
+  private setState(key: string, value: string) {
+    this.db.prepare(
+      'INSERT OR REPLACE INTO _indexer_state (key, value) VALUES (?, ?)'
+    ).run(key, value);
+  }
+
+  private getLastProcessedSlot(): number {
+    const val = this.getState('last_processed_slot');
+    return val ? parseInt(val) : 0;
+  }
+
+  private setLastProcessedSlot(slot: number) {
+    this.setState('last_processed_slot', String(slot));
+  }
+
+  // ─── Transaction processing ───────────────────────────────────────────────
+
+  private async fetchTx(signature: string): Promise<ParsedTransactionWithMeta | null> {
+    return withRetry(
+      () => this.connection.getParsedTransaction(signature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: 'confirmed',
+      }),
+      { maxAttempts: 5, initialDelayMs: 500 }
+    );
+  }
+
+  private async fetchSignatures(before?: string, limit = 100): Promise<ConfirmedSignatureInfo[]> {
+    return withRetry(
+      () => this.connection.getSignaturesForAddress(
+        this.programId,
+        { before, limit },
+        'confirmed'
+      ),
+      { maxAttempts: 5, initialDelayMs: 500 }
+    );
+  }
+
+  private processTx(tx: ParsedTransactionWithMeta, signature: string) {
+    if (!tx.meta || tx.meta.err) return;
+
+    const slot = tx.slot;
+    const blockTime = tx.blockTime ?? null;
     const message = tx.transaction.message as any;
-    const accounts: any[] = message.accountKeys || [];
-    const accountStrings = accounts.map((a: any) => a.pubkey?.toString());
+    const instructions = message.instructions ?? [];
 
-    if (schema.programId) {
-      const instructions = message.instructions || [];
-      const hasProgram = instructions.some((ix: any) => ix.programId?.toString() === schema.programId);
-      if (!hasProgram) return false;
-    }
-    if (schema.accountFilter && !accountStrings.includes(schema.accountFilter)) return false;
-    return true;
-  }
+    for (const ix of instructions) {
+      const programId = ix.programId?.toString();
+      if (programId !== this.programId.toString()) continue;
 
-  async indexForSchema(schema: IndexSchema): Promise<number> {
-    let count = 0;
-    try {
-      const pubkey = schema.accountFilter
-        ? new PublicKey(schema.accountFilter)
-        : schema.programId ? new PublicKey(schema.programId) : null;
-      if (!pubkey) return 0;
+      // Match instruction by discriminator or name
+      const rawData = ix.data ? Buffer.from(ix.data, 'base64') : null;
 
-      const signatures: ConfirmedSignatureInfo[] = await this.connection.getSignaturesForAddress(pubkey, { limit: 10 });
+      for (const idlIx of this.idl.instructions) {
+        const tableName = getInstructionTableName(this.idl.name, idlIx.name);
 
-      for (const sigInfo of signatures) {
-        const tx = await this.connection.getParsedTransaction(sigInfo.signature, { maxSupportedTransactionVersion: 0 });
-        if (!tx || !this.matchesFilter(tx, schema)) continue;
+        // Try to decode args
+        const args = rawData
+          ? decodeInstructionArgs(idlIx.args, new Uint8Array(rawData))
+          : {};
 
-        const data: Record<string, any> = {};
-        for (const field of schema.fields) {
-          data[field.name] = this.extractField(tx, field);
+        // Build accounts map
+        const accountKeys = message.accountKeys ?? [];
+        const accountValues: Record<string, string> = {};
+        idlIx.accounts.forEach((acc, i) => {
+          const key = accountKeys[i];
+          accountValues[`account_${acc.name.toLowerCase()}`] = key?.pubkey?.toString() ?? null;
+        });
+
+        // Build row
+        const row: Record<string, any> = {
+          signature,
+          slot,
+          block_time: blockTime,
+          ...accountValues,
+          indexed_at: Date.now(),
+        };
+
+        for (const field of idlIx.args) {
+          row[`arg_${field.name.toLowerCase()}`] = args[field.name] !== undefined
+            ? String(args[field.name])
+            : null;
         }
-        this.schemaManager.saveTransaction(schema.id, sigInfo.signature, sigInfo.slot, data);
-        count++;
+
+        const cols = Object.keys(row);
+        const placeholders = cols.map(() => '?').join(', ');
+        const values = cols.map(c => row[c]);
+
+        try {
+          this.db.prepare(
+            `INSERT OR IGNORE INTO ${tableName} (${cols.join(', ')}) VALUES (${placeholders})`
+          ).run(...values);
+        } catch (err: any) {
+          logger.warn('Failed to insert row', { table: tableName, error: err.message });
+        }
+
+        // Only process first matching instruction per tx for now
+        break;
       }
-    } catch (err: any) {
-      console.error(`Error indexing schema ${schema.id}:`, err.message);
     }
-    return count;
+
+    if (slot > this.getLastProcessedSlot()) {
+      this.setLastProcessedSlot(slot);
+    }
   }
 
-  startWatching(schema: IndexSchema) {
-    if (this.intervals.has(schema.id)) return;
-    const interval = setInterval(async () => {
-      const count = await this.indexForSchema(schema);
-      if (count > 0) console.log(`[${schema.name}] Indexed ${count} new transactions`);
-    }, config.POLL_INTERVAL_MS);
-    this.intervals.set(schema.id, interval);
-    console.log(`Started watching schema: ${schema.name}`);
+  // ─── Batch mode ──────────────────────────────────────────────────────────────
+
+  async runBatch(opts: BatchOptions = {}): Promise<number> {
+    logger.info('Starting batch indexing', opts);
+    let processed = 0;
+
+    if (opts.signatures?.length) {
+      // Process specific signatures
+      for (const sig of opts.signatures) {
+        const tx = await this.fetchTx(sig);
+        if (tx) { this.processTx(tx, sig); processed++; }
+      }
+      return processed;
+    }
+
+    // Paginate through signatures
+    let before: string | undefined;
+    while (!this.shutdownRequested) {
+      const sigs = await this.fetchSignatures(before, 100);
+      if (!sigs.length) break;
+
+      for (const sigInfo of sigs) {
+        if (opts.fromSlot && sigInfo.slot < opts.fromSlot) { return processed; }
+        if (opts.toSlot && sigInfo.slot > opts.toSlot) continue;
+
+        const tx = await this.fetchTx(sigInfo.signature);
+        if (tx) { this.processTx(tx, sigInfo.signature); processed++; }
+        await sleep(50); // rate limit
+      }
+
+      before = sigs[sigs.length - 1].signature;
+      logger.info('Batch progress', { processed, lastSlot: sigs[sigs.length - 1].slot });
+    }
+
+    logger.info('Batch indexing complete', { processed });
+    return processed;
   }
 
-  stopWatching(schemaId: string) {
-    const interval = this.intervals.get(schemaId);
-    if (interval) { clearInterval(interval); this.intervals.delete(schemaId); }
-  }
+  // ─── Real-time mode with cold start ──────────────────────────────────────────
 
-  startAll() {
+  async runRealtime(): Promise<void> {
     this.running = true;
-    const schemas = this.schemaManager.listSchemas();
-    for (const schema of schemas) this.startWatching(schema);
-    console.log(`Started indexer with ${schemas.length} active schemas`);
+    logger.info('Starting real-time indexing with cold start');
+
+    // Cold start: backfill missed transactions
+    await this.backfill();
+
+    // Real-time polling
+    logger.info('Cold start complete, switching to real-time polling');
+    while (this.running && !this.shutdownRequested) {
+      try {
+        await this.pollNew();
+      } catch (err: any) {
+        logger.error('Polling error', { error: err.message });
+      }
+      await sleep(config.POLL_INTERVAL_MS);
+    }
   }
+
+  private async backfill(): Promise<void> {
+    const lastSlot = this.getLastProcessedSlot();
+    logger.info('Backfilling', { fromSlot: lastSlot });
+
+    let before: string | undefined;
+    let backfilled = 0;
+
+    while (!this.shutdownRequested) {
+      const sigs = await this.fetchSignatures(before, 100);
+      if (!sigs.length) break;
+
+      const newSigs = sigs.filter(s => s.slot > lastSlot);
+      if (!newSigs.length) break;
+
+      for (const sigInfo of newSigs.reverse()) {
+        const tx = await this.fetchTx(sigInfo.signature);
+        if (tx) { this.processTx(tx, sigInfo.signature); backfilled++; }
+        await sleep(50);
+      }
+
+      if (newSigs.length < sigs.length) break;
+      before = sigs[sigs.length - 1].signature;
+    }
+
+    logger.info('Backfill complete', { backfilled });
+  }
+
+  private async pollNew(): Promise<void> {
+    const sigs = await this.fetchSignatures(undefined, 10);
+    const lastSlot = this.getLastProcessedSlot();
+
+    for (const sigInfo of sigs) {
+      if (sigInfo.slot <= lastSlot) continue;
+      const tx = await this.fetchTx(sigInfo.signature);
+      if (tx) { this.processTx(tx, sigInfo.signature); }
+    }
+  }
+
+  // ─── Shutdown ─────────────────────────────────────────────────────────────
 
   stop() {
+    logger.info('Graceful shutdown requested');
+    this.shutdownRequested = true;
     this.running = false;
-    for (const [id] of this.intervals) this.stopWatching(id);
-    console.log('Indexer stopped');
   }
 
   get isRunning() { return this.running; }

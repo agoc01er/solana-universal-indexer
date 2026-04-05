@@ -4,6 +4,7 @@ import { AnchorIdl } from './idl';
 import { createDb } from './db';
 import { SolanaIndexer } from './indexer';
 import { createApp } from './api';
+import { AccountWatcher } from './account-watcher';
 import { IdlVersionManager } from './idl-version';
 import { config } from './config';
 import { logger } from './logger';
@@ -11,7 +12,7 @@ import { logger } from './logger';
 function loadIdl(): AnchorIdl {
   const idlPath = config.IDL_PATH;
   if (!fs.existsSync(idlPath)) {
-    logger.warn('No IDL file found, using example IDL', { idlPath });
+    logger.warn('No IDL file found, using built-in example IDL', { idlPath });
     return {
       name: 'example_program',
       version: '0.1.0',
@@ -27,7 +28,7 @@ function loadIdl(): AnchorIdl {
         {
           name: 'initialize',
           accounts: [{ name: 'authority', isMut: false, isSigner: true }],
-          args: [],
+          args: [{ name: 'bump', type: 'u8' }],
         },
       ],
       accounts: [],
@@ -37,60 +38,106 @@ function loadIdl(): AnchorIdl {
 }
 
 async function main() {
-  logger.info('Starting Universal Solana Indexer v2');
+  logger.info('Starting Universal Solana Indexer', { version: '3.0.0' });
 
   if (!config.PROGRAM_ID) {
-    logger.error('PROGRAM_ID is required');
+    logger.error('PROGRAM_ID environment variable is required');
     process.exit(1);
   }
 
   const idl = loadIdl();
-  logger.info('IDL loaded', { program: idl.name, instructions: idl.instructions.length });
+  logger.info('IDL loaded', {
+    program: idl.name,
+    instructions: idl.instructions.length,
+    accounts: idl.accounts?.length ?? 0,
+    events: (idl as any).events?.length ?? 0,
+  });
 
   const programId = new PublicKey(config.PROGRAM_ID);
 
-  // Create DB
-  const repo = createDb(idl, config.DB_PATH);
+  // ── Database setup (SQLite default, PostgreSQL optional) ──────────────────
+  let repo: any;
 
-  // IDL version tracking
-  const idlVersionManager = new IdlVersionManager(config.PROGRAM_ID, (repo as any).db ?? (() => {
-    // Access the underlying SQLite db — quick workaround
-    const Database = require('better-sqlite3');
-    return new Database(config.DB_PATH);
-  })());
-  idlVersionManager.registerIdl(idl);
-
-  // Also try to fetch IDL from on-chain
-  try {
-    const { Connection } = require('@solana/web3.js');
-    const conn = new Connection(config.RPC_URL, 'confirmed');
-    const onChainIdl = await IdlVersionManager.fetchFromChain(config.PROGRAM_ID, conn);
-    if (onChainIdl) {
-      logger.info('On-chain IDL found, checking for upgrade');
-      await idlVersionManager.checkForUpgrade(onChainIdl, 0);
-    }
-  } catch (err: any) {
-    logger.debug('Could not check on-chain IDL', { error: err.message });
+  if (config.DB_TYPE === 'postgres' && config.DATABASE_URL) {
+    logger.info('Using PostgreSQL backend');
+    const { PostgresRepository } = await import('./pg-adapter');
+    repo = new PostgresRepository({ connectionString: config.DATABASE_URL, idl });
+    await repo.init();
+  } else {
+    logger.info('Using SQLite backend (set DB_TYPE=postgres for production)');
+    repo = createDb(idl, config.DB_PATH);
   }
 
-  const indexer = new SolanaIndexer(idl, programId, repo, config.RPC_URL);
-  const app = createApp(repo, indexer, idl);
+  // ── IDL Version Manager ───────────────────────────────────────────────────
+  let idlDb: any;
+  try {
+    const Database = require('better-sqlite3');
+    idlDb = new Database(config.DB_PATH);
+  } catch { idlDb = null; }
 
+  if (idlDb) {
+    const idlVersionManager = new IdlVersionManager(config.PROGRAM_ID, idlDb);
+    idlVersionManager.registerIdl(idl);
+
+    // Check for on-chain IDL upgrade
+    try {
+      const { Connection } = require('@solana/web3.js');
+      const conn = new Connection(config.RPC_URL, 'confirmed');
+      const onChainIdl = await IdlVersionManager.fetchFromChain(config.PROGRAM_ID, conn);
+      if (onChainIdl) {
+        logger.info('On-chain IDL found, checking for upgrade');
+        await idlVersionManager.checkForUpgrade(onChainIdl, 0);
+      }
+    } catch (err: any) {
+      logger.debug('On-chain IDL check skipped', { error: err.message });
+    }
+  }
+
+  // ── Indexer setup ─────────────────────────────────────────────────────────
+  const indexer = new SolanaIndexer(idl, programId, repo, config.RPC_URL);
+
+  // ── Account Watcher (background daemon) ───────────────────────────────────
+  let accountWatcher: AccountWatcher | null = null;
+  if (idl.accounts?.length && config.MODE === 'realtime') {
+    accountWatcher = new AccountWatcher(
+      idl,
+      programId,
+      repo,
+      config.RPC_URL,
+      config.WS_URL,
+      30_000
+    );
+
+    // Subscribe to real-time account changes
+    await accountWatcher.subscribeToChanges();
+
+    // Start background sync loop (non-blocking)
+    accountWatcher.start().catch(err => {
+      logger.error('Account watcher crashed', { error: err.message });
+    });
+  }
+
+  // ── API server ────────────────────────────────────────────────────────────
+  const app = createApp(repo, indexer, idl);
   const server = app.listen(config.PORT, () => {
-    logger.info('API server started', { port: config.PORT });
-    logger.info('Endpoints available', {
-      health: `http://localhost:${config.PORT}/health`,
-      metrics: `http://localhost:${config.PORT}/metrics`,
-      schema: `http://localhost:${config.PORT}/schema`,
-      stats: `http://localhost:${config.PORT}/stats`,
-      events: `http://localhost:${config.PORT}/events`,
+    logger.info('API server ready', {
+      port: config.PORT,
+      endpoints: {
+        health: `/health`,
+        metrics: `/metrics`,
+        schema: `/schema`,
+        stats: `/stats`,
+        events: `/events`,
+        instructions: `/instructions/:name`,
+      },
     });
   });
 
-  // Start indexing
+  // ── Start indexing ────────────────────────────────────────────────────────
   if (config.MODE === 'batch') {
+    logger.info('Starting batch mode', { fromSlot: config.FROM_SLOT, toSlot: config.TO_SLOT });
     await indexer.runBatch({ fromSlot: config.FROM_SLOT, toSlot: config.TO_SLOT });
-    logger.info('Batch complete, shutting down');
+    logger.info('Batch complete');
     server.close();
     process.exit(0);
   } else {
@@ -100,15 +147,21 @@ async function main() {
     });
   }
 
-  // Graceful shutdown
+  // ── Graceful shutdown ─────────────────────────────────────────────────────
   const shutdown = async (signal: string) => {
-    logger.info('Shutdown signal received', { signal });
+    logger.info('Shutdown signal', { signal });
+
+    accountWatcher?.stop();
     await indexer.stop();
-    server.close(() => {
-      logger.info('Server closed');
+
+    server.close(async () => {
+      logger.info('HTTP server closed');
+      if (repo.close) await repo.close();
+      logger.info('Shutdown complete');
       process.exit(0);
     });
-    setTimeout(() => { logger.error('Forced exit'); process.exit(1); }, 10000);
+
+    setTimeout(() => { logger.error('Forced exit'); process.exit(1); }, 10_000);
   };
 
   process.on('SIGINT', () => shutdown('SIGINT'));

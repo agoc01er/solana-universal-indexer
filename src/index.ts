@@ -64,7 +64,7 @@ async function main() {
     repo = new PostgresRepository({ connectionString: config.DATABASE_URL, idl });
     await repo.init();
   } else {
-    logger.info('Using SQLite backend (set DB_TYPE=postgres for production)');
+    logger.info('Using SQLite backend (lightweight mode — set DB_TYPE=postgres for production)');
     repo = createDb(idl, config.DB_PATH);
   }
 

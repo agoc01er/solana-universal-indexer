@@ -13,8 +13,8 @@ export const config = {
   // API
   PORT: parseInt(process.env.PORT || '3000'),
 
-  // Database: sqlite (default) or postgres
-  DB_TYPE: (process.env.DB_TYPE || 'sqlite') as 'sqlite' | 'postgres',
+  // Database: postgres (production default) or sqlite (edge/CI/lightweight)
+  DB_TYPE: (process.env.DB_TYPE || 'postgres') as 'sqlite' | 'postgres',
   DB_PATH: process.env.DB_PATH || './indexer.db',
   DATABASE_URL: process.env.DATABASE_URL || '',
 

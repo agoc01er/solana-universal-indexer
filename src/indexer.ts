@@ -3,28 +3,25 @@ import {
   PublicKey,
   ConfirmedSignatureInfo,
   ParsedTransactionWithMeta,
-  AccountInfo,
+  Logs,
 } from '@solana/web3.js';
-import Database from 'better-sqlite3';
 import { config } from './config';
 import { logger } from './logger';
 import { withRetry, sleep } from './retry';
+import { AnchorIdl } from './idl';
+import { InstructionDecoder, AccountDecoder } from './decoder';
+import { EventDecoder } from './events';
+import { IndexerRepository } from './db';
 import {
-  AnchorIdl,
-  generateSchemaSQL,
-  getInstructionTableName,
-  getAccountTableName,
-  buildDiscriminatorMap,
-  matchInstruction,
-  decodeInstructionArgs,
-} from './idl';
-
-export interface IndexerOptions {
-  idl: AnchorIdl;
-  programId: string;
-  db: Database.Database;
-  rpcUrl?: string;
-}
+  recordTxProcessed,
+  recordTxLatency,
+  recordRpcCall,
+  recordRpcError,
+  setLastProcessedSlot,
+  setSlotLag,
+  recordEventDecoded,
+  recordInstructionIndexed,
+} from './metrics';
 
 export interface BatchOptions {
   fromSlot?: number;
@@ -34,203 +31,188 @@ export interface BatchOptions {
 
 export class SolanaIndexer {
   private connection: Connection;
-  private db: Database.Database;
-  private idl: AnchorIdl;
-  private programId: PublicKey;
+  private wsConnection: Connection;
+  private ixDecoder: InstructionDecoder;
+  private accDecoder: AccountDecoder;
+  private eventDecoder: EventDecoder;
   private running = false;
   private shutdownRequested = false;
-  private discriminatorMap: Map<string, any>;
+  private wsSubscriptionId: number | null = null;
+  // Gap detection: track slots seen via WS vs polling
+  private wsSeenSlots = new Set<number>();
+  private lastGapCheckSlot = 0;
 
-  constructor(opts: IndexerOptions) {
-    this.connection = new Connection(opts.rpcUrl ?? config.RPC_URL, 'confirmed');
-    this.db = opts.db;
-    this.idl = opts.idl;
-    this.programId = new PublicKey(opts.programId);
-    this.discriminatorMap = buildDiscriminatorMap(opts.idl);
+  constructor(
+    private idl: AnchorIdl,
+    private programId: PublicKey,
+    private repo: IndexerRepository,
+    rpcUrl?: string
+  ) {
+    this.connection = new Connection(rpcUrl ?? config.RPC_URL, 'confirmed');
+    const wsUrl = config.WS_URL ||
+      (rpcUrl ?? config.RPC_URL)
+        .replace('https://', 'wss://')
+        .replace('http://', 'ws://');
+    this.wsConnection = new Connection(wsUrl, 'confirmed');
 
-    const ddl = generateSchemaSQL(opts.idl);
-    this.db.exec(ddl);
+    this.ixDecoder = new InstructionDecoder(idl);
+    this.accDecoder = new AccountDecoder(idl);
+    this.eventDecoder = new EventDecoder(idl);
 
     logger.info('Indexer initialized', {
-      program: opts.idl.name,
-      programId: opts.programId,
-      instructions: opts.idl.instructions.map(ix => ix.name),
+      program: idl.name,
+      programId: programId.toString(),
+      instructions: idl.instructions.map(ix => ix.name),
+      hasEvents: this.eventDecoder.hasEvents,
     });
   }
 
-  // ─── State ───────────────────────────────────────────────────────────────────
+  // ─── RPC wrappers with metrics ────────────────────────────────────────────
 
-  private getState(key: string): string | null {
-    const row = this.db.prepare('SELECT value FROM _indexer_state WHERE key = ?').get(key) as any;
-    return row?.value ?? null;
+  private async fetchTx(signature: string): Promise<ParsedTransactionWithMeta | null> {
+    const start = Date.now();
+    try {
+      const result = await withRetry(
+        () => this.connection.getParsedTransaction(signature, {
+          maxSupportedTransactionVersion: 0,
+          commitment: 'confirmed',
+        }),
+        { maxAttempts: 5, initialDelayMs: 500, jitter: true }
+      );
+      recordRpcCall('getParsedTransaction', Date.now() - start);
+      return result;
+    } catch (err: any) {
+      recordRpcError('getParsedTransaction');
+      throw err;
+    }
   }
 
-  private setState(key: string, value: string) {
-    this.db.prepare('INSERT OR REPLACE INTO _indexer_state (key, value) VALUES (?, ?)')
-      .run(key, value);
+  private async fetchSignatures(opts: { before?: string; limit?: number } = {}): Promise<ConfirmedSignatureInfo[]> {
+    const start = Date.now();
+    try {
+      const result = await withRetry(
+        () => this.connection.getSignaturesForAddress(
+          this.programId,
+          { before: opts.before, limit: opts.limit ?? 100 },
+          'confirmed'
+        ),
+        { maxAttempts: 5, initialDelayMs: 500, jitter: true }
+      );
+      recordRpcCall('getSignaturesForAddress', Date.now() - start);
+      return result;
+    } catch (err: any) {
+      recordRpcError('getSignaturesForAddress');
+      throw err;
+    }
   }
 
-  private getLastProcessedSlot(): number {
-    const val = this.getState('last_processed_slot');
-    return val ? parseInt(val) : 0;
-  }
-
-  private setLastProcessedSlot(slot: number) {
-    this.setState('last_processed_slot', String(slot));
-  }
-
-  // ─── RPC helpers ─────────────────────────────────────────────────────────────
-
-  private fetchTx(signature: string): Promise<ParsedTransactionWithMeta | null> {
-    return withRetry(
-      () => this.connection.getParsedTransaction(signature, {
-        maxSupportedTransactionVersion: 0,
-        commitment: 'confirmed',
-      }),
-      { maxAttempts: 5, initialDelayMs: 500 }
-    );
-  }
-
-  private fetchSignatures(opts: { before?: string; until?: string; limit?: number } = {}): Promise<ConfirmedSignatureInfo[]> {
-    return withRetry(
-      () => this.connection.getSignaturesForAddress(
-        this.programId,
-        { before: opts.before, until: opts.until, limit: opts.limit ?? 100 },
-        'confirmed'
-      ),
-      { maxAttempts: 5, initialDelayMs: 500 }
-    );
-  }
-
-  private fetchAccountInfo(pubkey: PublicKey): Promise<AccountInfo<Buffer> | null> {
-    return withRetry(
-      () => this.connection.getAccountInfo(pubkey),
-      { maxAttempts: 3, initialDelayMs: 500 }
-    );
+  private async getSlotHeight(): Promise<number> {
+    try {
+      return await this.connection.getSlot('finalized');
+    } catch {
+      return 0;
+    }
   }
 
   // ─── Transaction processing ───────────────────────────────────────────────
 
-  /**
-   * Process a single parsed transaction.
-   * Uses discriminator matching to correctly identify which instruction was called.
-   * All DB writes happen in a single transaction for atomicity.
-   */
   private processTx(tx: ParsedTransactionWithMeta, signature: string): void {
-    if (!tx.meta || tx.meta.err) return;
+    const txStart = Date.now();
+    if (!tx.meta || tx.meta.err) {
+      recordTxProcessed(this.idl.name, 'skipped');
+      return;
+    }
 
     const slot = tx.slot;
     const blockTime = tx.blockTime ?? null;
     const message = tx.transaction.message as any;
     const instructions: any[] = message.instructions ?? [];
     const accountKeys: any[] = message.accountKeys ?? [];
+    const accountKeyStrings = accountKeys.map((k: any) => k.pubkey?.toString() ?? '');
+    const logs = tx.meta.logMessages ?? [];
 
-    const insertFn = this.db.transaction(() => {
-      for (const ix of instructions) {
-        // Only process instructions for our program
+    // ── Decode Anchor events (UNIQUE FEATURE) ────────────────────────────────
+    if (this.eventDecoder.hasEvents) {
+      const events = this.eventDecoder.decodeFromLogs(logs, slot, signature);
+      for (const event of events) {
+        this.repo.insertEvent(event.name, signature, slot, blockTime, event.data);
+        recordEventDecoded(event.name);
+      }
+    }
+
+    // ── Decode top-level instructions ─────────────────────────────────────────
+    for (const ix of instructions) {
+      if (ix.programId?.toString() !== this.programId.toString()) continue;
+      if (!ix.data) continue;
+
+      const decoded = this.ixDecoder.decode(ix.data, accountKeyStrings);
+      if (!decoded) continue;
+
+      this.repo.insertInstruction(
+        decoded.name, signature, slot, blockTime,
+        decoded.accounts, decoded.args,
+        { cpiDepth: 0, parentIxIndex: null }
+      );
+      recordInstructionIndexed(decoded.name);
+    }
+
+    // ── Decode inner instructions (CPI) ──────────────────────────────────────
+    const innerIxs = tx.meta.innerInstructions ?? [];
+    for (const inner of innerIxs) {
+      for (const ix of inner.instructions as any[]) {
         if (ix.programId?.toString() !== this.programId.toString()) continue;
+        if (!ix.data) continue;
 
-        // Decode raw data
-        const rawData: Buffer | null = ix.data
-          ? Buffer.from(ix.data, 'base64')
-          : null;
+        const decoded = this.ixDecoder.decode(ix.data, accountKeyStrings);
+        if (!decoded) continue;
 
-        if (!rawData) continue;
-
-        // Match by Anchor discriminator
-        const idlIx = matchInstruction(rawData, this.discriminatorMap);
-        if (!idlIx) {
-          logger.debug('Unknown instruction discriminator', {
-            signature,
-            disc: rawData.slice(0, 8).toString('hex'),
-          });
-          continue;
-        }
-
-        const tableName = getInstructionTableName(this.idl.name, idlIx.name);
-
-        // Decode args
-        const args = decodeInstructionArgs(idlIx.args, rawData);
-
-        // Map accounts by position
-        const accountValues: Record<string, string | null> = {};
-        idlIx.accounts.forEach((acc, i) => {
-          const key = accountKeys[i];
-          accountValues[`account_${acc.name.toLowerCase()}`] = key?.pubkey?.toString() ?? null;
-        });
-
-        const row: Record<string, any> = {
-          signature,
-          slot,
-          block_time: blockTime,
-          ...accountValues,
-          indexed_at: Date.now(),
-        };
-
-        for (const field of idlIx.args) {
-          const val = args[field.name];
-          row[`arg_${field.name.toLowerCase()}`] = val !== undefined && val !== null ? String(val) : null;
-        }
-
-        const cols = Object.keys(row);
-        const placeholders = cols.map(() => '?').join(', ');
-
-        try {
-          this.db.prepare(
-            `INSERT OR IGNORE INTO ${tableName} (${cols.join(', ')}) VALUES (${placeholders})`
-          ).run(...cols.map(c => row[c]));
-
-          logger.debug('Indexed instruction', { instruction: idlIx.name, signature, slot });
-        } catch (err: any) {
-          logger.warn('Insert failed', { table: tableName, error: err.message, signature });
-        }
+        this.repo.insertInstruction(
+          decoded.name,
+          `${signature}:cpi:${inner.index}`,
+          slot, blockTime,
+          decoded.accounts, decoded.args,
+          { cpiDepth: 1, parentIxIndex: inner.index }
+        );
+        recordInstructionIndexed(decoded.name);
       }
+    }
 
-      // Update checkpoint inside same transaction
-      if (slot > this.getLastProcessedSlot()) {
-        this.setLastProcessedSlot(slot);
-      }
-    });
+    if (slot > this.repo.getLastProcessedSlot()) {
+      this.repo.setLastProcessedSlot(slot);
+      setLastProcessedSlot(slot);
+    }
 
-    insertFn();
+    this.wsSeenSlots.add(slot);
+    recordTxProcessed(this.idl.name, 'ok');
+    recordTxLatency(Date.now() - txStart);
   }
 
-  /**
-   * Decode and store on-chain account state for a given account type.
-   */
-  async indexAccountState(pubkey: string, accountTypeName: string): Promise<void> {
-    const accDef = this.idl.accounts?.find(a => a.name === accountTypeName);
-    if (!accDef) throw new Error(`Account type '${accountTypeName}' not in IDL`);
+  // ─── Account state indexing ───────────────────────────────────────────────
 
-    const accountInfo = await this.fetchAccountInfo(new PublicKey(pubkey));
-    if (!accountInfo) {
-      logger.warn('Account not found', { pubkey });
-      return;
-    }
+  async indexAllAccounts(): Promise<number> {
+    if (!this.idl.accounts?.length) return 0;
+    let count = 0;
 
-    const tableName = getAccountTableName(this.idl.name, accDef.name);
-    const data = Buffer.from(accountInfo.data);
+    const programAccounts = await withRetry(
+      () => this.connection.getProgramAccounts(this.programId),
+      { maxAttempts: 3, initialDelayMs: 1000 }
+    );
 
-    // Decode fields (skip 8-byte Anchor account discriminator)
-    const row: Record<string, any> = { pubkey, slot: 0, updated_at: Date.now() };
-    let offset = 8;
-    for (const field of accDef.type.fields) {
-      try {
-        const { decodeField } = await import('./idl');
-        const [val, nextOffset] = decodeField(field.type, data, offset);
-        row[field.name.toLowerCase()] = val !== null ? String(val) : null;
-        offset = nextOffset;
-      } catch {
-        row[field.name.toLowerCase()] = null;
+    for (const { pubkey, account } of programAccounts) {
+      const data = Buffer.from(account.data);
+      if (data.length < 8) continue;
+
+      for (const accDef of (this.idl.accounts ?? [])) {
+        const decoded = this.accDecoder.decode(accDef.name, data);
+        if (!decoded) continue;
+        this.repo.upsertAccountSnapshot(accDef.name, pubkey.toString(), 0, decoded.data);
+        count++;
+        break;
       }
     }
 
-    const cols = Object.keys(row);
-    this.db.prepare(
-      `INSERT OR REPLACE INTO ${tableName} (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`
-    ).run(...cols.map(c => row[c]));
-
-    logger.info('Account state indexed', { pubkey, type: accountTypeName });
+    logger.info('Account states indexed', { count });
+    return count;
   }
 
   // ─── Batch mode ──────────────────────────────────────────────────────────────
@@ -246,26 +228,21 @@ export class SolanaIndexer {
         if (tx) { this.processTx(tx, sig); processed++; }
         await sleep(50);
       }
-      logger.info('Batch complete (signatures)', { processed });
+      logger.info('Batch complete', { processed });
       return processed;
     }
 
-    // Paginate: getSignaturesForAddress returns newest first
     let before: string | undefined;
-
     while (!this.shutdownRequested) {
       const page = await this.fetchSignatures({ before, limit: 100 });
       if (!page.length) break;
 
       for (const sigInfo of page) {
         if (this.shutdownRequested) break;
-
-        // fromSlot check: signatures are newest-first, so stop when below fromSlot
         if (opts.fromSlot !== undefined && sigInfo.slot < opts.fromSlot) {
-          logger.info('Reached fromSlot boundary', { slot: sigInfo.slot, fromSlot: opts.fromSlot });
+          logger.info('Reached fromSlot boundary', { slot: sigInfo.slot });
           return processed;
         }
-        // toSlot check: skip if above toSlot
         if (opts.toSlot !== undefined && sigInfo.slot > opts.toSlot) continue;
 
         const tx = await this.fetchTx(sigInfo.signature);
@@ -281,81 +258,157 @@ export class SolanaIndexer {
     return processed;
   }
 
-  // ─── Real-time mode with cold start ──────────────────────────────────────────
+  // ─── Real-time with WebSocket + hybrid gap detection ──────────────────────
 
   async runRealtime(): Promise<void> {
     this.running = true;
     logger.info('Starting real-time indexing');
 
-    // Cold start: backfill from last checkpoint
     await this.backfill();
+    logger.info('Cold start complete');
 
-    logger.info('Cold start complete, entering real-time polling');
+    // Start WebSocket subscription
+    await this.subscribeToLogs();
+
+    // Hybrid: also poll periodically for gap detection
+    let pollCycle = 0;
     while (this.running && !this.shutdownRequested) {
-      try {
-        await this.pollNew();
-      } catch (err: any) {
-        logger.error('Poll error', { error: err.message });
-      }
       await sleep(config.POLL_INTERVAL_MS);
+      pollCycle++;
+
+      // Every 6 cycles (~30s): run gap detection
+      if (pollCycle % 6 === 0) {
+        await this.detectAndFillGaps();
+      }
+
+      // Fallback poll if WS is down
+      if (this.wsSubscriptionId === null) {
+        try { await this.pollNew(); } catch (err: any) {
+          logger.error('Fallback poll failed', { error: err.message });
+        }
+      }
+
+      // Update slot lag metric every cycle
+      try {
+        const chainSlot = await this.getSlotHeight();
+        const ourSlot = this.repo.getLastProcessedSlot();
+        if (chainSlot > 0 && ourSlot > 0) setSlotLag(chainSlot - ourSlot);
+      } catch { /* ignore */ }
     }
   }
 
-  /**
-   * Backfill: fetch all signatures newer than last checkpoint, process oldest-first.
-   */
-  private async backfill(): Promise<void> {
-    const lastSlot = this.getLastProcessedSlot();
-    logger.info('Backfilling from checkpoint', { lastSlot });
-    let backfilled = 0;
+  private async subscribeToLogs(): Promise<void> {
+    try {
+      this.wsSubscriptionId = this.wsConnection.onLogs(
+        this.programId,
+        async (logs: Logs) => {
+          if (logs.err) return;
+          try {
+            const tx = await this.fetchTx(logs.signature);
+            if (tx) this.processTx(tx, logs.signature);
+          } catch (err: any) {
+            logger.error('WS tx fetch failed', { sig: logs.signature, error: err.message });
+          }
+        },
+        'confirmed'
+      );
+      logger.info('WebSocket subscription active', { id: this.wsSubscriptionId });
+    } catch (err: any) {
+      logger.warn('WebSocket failed, using polling only', { error: err.message });
+      this.wsSubscriptionId = null;
+    }
+  }
 
-    // Collect all new sigs first, then process oldest-first
-    const allNewSigs: ConfirmedSignatureInfo[] = [];
+  private async backfill(): Promise<void> {
+    const lastSlot = this.repo.getLastProcessedSlot();
+    logger.info('Backfilling', { fromSlot: lastSlot });
+
+    const allNew: ConfirmedSignatureInfo[] = [];
     let before: string | undefined;
 
     while (!this.shutdownRequested) {
       const page = await this.fetchSignatures({ before, limit: 100 });
       if (!page.length) break;
-
       const newInPage = page.filter(s => s.slot > lastSlot);
-      allNewSigs.push(...newInPage);
-
-      // Stop paginating when we hit already-seen slots
+      allNew.push(...newInPage);
       if (newInPage.length < page.length) break;
       before = page[page.length - 1].signature;
     }
 
-    // Process oldest first (reverse: getSignaturesForAddress returns newest first)
-    for (const sigInfo of allNewSigs.reverse()) {
+    for (const sigInfo of allNew.reverse()) {
       if (this.shutdownRequested) break;
       const tx = await this.fetchTx(sigInfo.signature);
-      if (tx) { this.processTx(tx, sigInfo.signature); backfilled++; }
+      if (tx) this.processTx(tx, sigInfo.signature);
       await sleep(50);
     }
 
-    logger.info('Backfill complete', { backfilled, nowAtSlot: this.getLastProcessedSlot() });
+    logger.info('Backfill complete', { count: allNew.length, slot: this.repo.getLastProcessedSlot() });
+  }
+
+  private async pollNew(): Promise<void> {
+    const lastSlot = this.repo.getLastProcessedSlot();
+    const sigs = await this.fetchSignatures({ limit: 20 });
+    for (const sigInfo of sigs.reverse()) {
+      if (sigInfo.slot <= lastSlot) continue;
+      const tx = await this.fetchTx(sigInfo.signature);
+      if (tx) this.processTx(tx, sigInfo.signature);
+    }
   }
 
   /**
-   * Poll for transactions newer than our last checkpoint.
+   * Gap detection: compare WS-seen slots with recent polling results.
+   * Fill any gaps to ensure completeness.
    */
-  private async pollNew(): Promise<void> {
-    const lastSlot = this.getLastProcessedSlot();
-    const sigs = await this.fetchSignatures({ limit: 20 });
+  private async detectAndFillGaps(): Promise<void> {
+    const lastSlot = this.repo.getLastProcessedSlot();
+    if (lastSlot <= this.lastGapCheckSlot) return;
 
-    for (const sigInfo of sigs.reverse()) { // process oldest first
-      if (sigInfo.slot <= lastSlot) continue;
-      const tx = await this.fetchTx(sigInfo.signature);
-      if (tx) { this.processTx(tx, sigInfo.signature); }
+    try {
+      const recentSigs = await this.fetchSignatures({ limit: 50 });
+      const polledSlots = new Set(recentSigs.map(s => s.slot));
+
+      let gapsFilled = 0;
+      for (const sig of recentSigs) {
+        if (!this.wsSeenSlots.has(sig.slot)) {
+          // This slot was not seen via WebSocket — process it
+          const tx = await this.fetchTx(sig.signature);
+          if (tx) { this.processTx(tx, sig.signature); gapsFilled++; }
+          await sleep(50);
+        }
+      }
+
+      if (gapsFilled > 0) {
+        logger.info('Gap detection filled missing txs', { gapsFilled });
+      }
+
+      this.lastGapCheckSlot = lastSlot;
+      // Clean up old WS seen slots to prevent unbounded growth
+      if (this.wsSeenSlots.size > 10000) {
+        const minPolledSlot = Math.min(...polledSlots);
+        for (const slot of this.wsSeenSlots) {
+          if (slot < minPolledSlot - 1000) this.wsSeenSlots.delete(slot);
+        }
+      }
+    } catch (err: any) {
+      logger.warn('Gap detection error', { error: err.message });
     }
   }
 
   // ─── Shutdown ─────────────────────────────────────────────────────────────
 
-  stop(): void {
-    logger.info('Graceful shutdown requested');
+  async stop(): Promise<void> {
+    logger.info('Graceful shutdown initiated');
     this.shutdownRequested = true;
     this.running = false;
+
+    if (this.wsSubscriptionId !== null) {
+      try {
+        await this.wsConnection.removeOnLogsListener(this.wsSubscriptionId);
+      } catch { /* ignore */ }
+      this.wsSubscriptionId = null;
+    }
+
+    logger.info('Indexer stopped cleanly');
   }
 
   get isRunning() { return this.running; }

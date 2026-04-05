@@ -5,6 +5,7 @@ export interface RetryOptions {
   initialDelayMs?: number;
   maxDelayMs?: number;
   factor?: number;
+  jitter?: boolean; // full jitter (recommended for RPC)
 }
 
 export async function withRetry<T>(
@@ -15,26 +16,33 @@ export async function withRetry<T>(
   const initialDelayMs = opts.initialDelayMs ?? 500;
   const maxDelayMs = opts.maxDelayMs ?? 30000;
   const factor = opts.factor ?? 2;
+  const jitter = opts.jitter ?? true; // enabled by default
 
   let attempt = 0;
-  let delay = initialDelayMs;
+  let baseDelay = initialDelayMs;
 
   while (true) {
     try {
       return await fn();
     } catch (err: any) {
       attempt++;
-      if (attempt >= maxAttempts) {
-        throw err;
-      }
+      if (attempt >= maxAttempts) throw err;
+
+      // Full jitter: random in [0, min(cap, base)]
+      const cappedDelay = Math.min(baseDelay, maxDelayMs);
+      const delay = jitter
+        ? Math.floor(Math.random() * cappedDelay)
+        : cappedDelay;
+
       logger.warn('Retrying after error', {
         attempt,
         maxAttempts,
         delayMs: delay,
         error: err.message,
       });
+
       await sleep(delay);
-      delay = Math.min(delay * factor, maxDelayMs);
+      baseDelay = Math.min(baseDelay * factor, maxDelayMs);
     }
   }
 }

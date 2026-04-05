@@ -6,22 +6,18 @@ A production-ready, universal Solana transaction indexer that **automatically ad
 
 ---
 
-## What Makes This Different
+## Features
 
-Most indexers decode only instructions. This one goes further:
-
-| Feature | Others | This |
-|---------|--------|------|
-| IDL-driven schema | ✅ | ✅ |
-| Instruction decoding | ✅ | ✅ |
-| Account state (getProgramAccounts) | ✅ | ✅ |
-| **Anchor Event decoding (emit!())** | ❌ | ✅ |
-| **Prometheus /metrics endpoint** | ❌ | ✅ |
-| **IDL Version Manager (upgrade detection)** | ❌ | ✅ |
-| **Hybrid WebSocket + Polling with Gap Detection** | ❌ | ✅ |
-| **Cursor-based pagination** | ❌ | ✅ |
-| **CPI inner instruction indexing** | ❌ | ✅ |
-| SQLite (dev) + PostgreSQL (prod) | ❌ | ✅ |
+- **IDL-driven schema** — auto-generate database tables from any Anchor IDL
+- **Instruction decoding** — Anchor discriminator matching + BorshCoder
+- **Account state snapshots** — bulk sync via getProgramAccounts + real-time WS updates
+- **Anchor Event decoding** — decode `emit!()` events from program logs
+- **Prometheus `/metrics`** — slot lag, tx latency, RPC errors for production monitoring
+- **IDL Version Manager** — detects program upgrades, migrates schema automatically
+- **Hybrid WebSocket + Polling with Gap Detection** — never miss a transaction
+- **Cursor-based pagination** — stable API under concurrent writes
+- **CPI inner instruction indexing** — nested program calls with depth tracking
+- **SQLite (dev) + PostgreSQL (prod)** — single env var to switch
 
 ---
 

@@ -28,6 +28,18 @@ describe('MetricsRegistry', () => {
     expect(output).toContain('label="y"');
   });
 
+  test('HELP and TYPE lines appear only once per metric family when labels differ', () => {
+    metrics.incrementCounter('dedup_test', 'Dedup test', { status: 'ok' });
+    metrics.incrementCounter('dedup_test', 'Dedup test', { status: 'err' });
+    const output = metrics.render();
+    const helpCount = (output.match(/# HELP dedup_test /g) ?? []).length;
+    const typeCount = (output.match(/# TYPE dedup_test /g) ?? []).length;
+    expect(helpCount).toBe(1);
+    expect(typeCount).toBe(1);
+    expect(output).toContain('status="ok"');
+    expect(output).toContain('status="err"');
+  });
+
   test('setGauge updates gauge value', () => {
     metrics.setGauge('test_gauge', 'A test gauge', 42);
     const output = metrics.render();

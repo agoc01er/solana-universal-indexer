@@ -71,14 +71,22 @@ class MetricsRegistry {
   render(): string {
     const lines: string[] = [];
 
-    // Counters
+    // Counters — group by name so HELP/TYPE appear once per metric family
+    const counterFamilies = new Map<string, Counter[]>();
     for (const [, counter] of this.counters) {
-      lines.push(`# HELP ${counter.name} ${counter.help}`);
-      lines.push(`# TYPE ${counter.name} counter`);
-      const labelStr = Object.entries(counter.labels)
-        .map(([k, v]) => `${k}="${v}"`)
-        .join(',');
-      lines.push(`${counter.name}${labelStr ? `{${labelStr}}` : ''} ${counter.value}`);
+      const family = counterFamilies.get(counter.name) ?? [];
+      family.push(counter);
+      counterFamilies.set(counter.name, family);
+    }
+    for (const [name, family] of counterFamilies) {
+      lines.push(`# HELP ${name} ${family[0].help}`);
+      lines.push(`# TYPE ${name} counter`);
+      for (const counter of family) {
+        const labelStr = Object.entries(counter.labels)
+          .map(([k, v]) => `${k}="${v}"`)
+          .join(',');
+        lines.push(`${name}${labelStr ? `{${labelStr}}` : ''} ${counter.value}`);
+      }
     }
 
     // Gauges

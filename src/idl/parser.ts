@@ -108,6 +108,8 @@ CREATE TABLE IF NOT EXISTS _indexer_state (
       '  signature TEXT NOT NULL UNIQUE',
       '  slot INTEGER NOT NULL',
       '  block_time INTEGER',
+      '  cpi_depth INTEGER NOT NULL DEFAULT 0',
+      '  parent_ix_index INTEGER',
       ...ix.accounts.map(a => `  account_${a.name.toLowerCase()} TEXT`),
       ...ix.args.map(a => `  arg_${a.name.toLowerCase()} ${idlTypeToSql(a.type)}`),
       '  indexed_at INTEGER NOT NULL',

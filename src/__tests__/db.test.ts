@@ -1,5 +1,5 @@
-import { IndexerRepository } from '../db';
-import { AnchorIdl } from '../idl';
+import { IndexerRepository } from '../database/sqlite';
+import { AnchorIdl } from '../idl/parser';
 
 const mockIdl: AnchorIdl = {
   name: 'test_prog',

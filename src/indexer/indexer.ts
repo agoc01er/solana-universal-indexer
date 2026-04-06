@@ -5,13 +5,13 @@ import {
   ParsedTransactionWithMeta,
   Logs,
 } from '@solana/web3.js';
-import { config } from './config';
-import { logger } from './logger';
-import { withRetry, sleep } from './retry';
-import { AnchorIdl } from './idl';
-import { InstructionDecoder, AccountDecoder } from './decoder';
-import { EventDecoder } from './events';
-import { IndexerRepository } from './db';
+import { config } from '../config';
+import { logger } from '../observability/logger';
+import { withRetry, sleep } from '../utils/retry';
+import { AnchorIdl } from '../idl/parser';
+import { InstructionDecoder, AccountDecoder } from '../decoder/instruction';
+import { EventDecoder } from '../decoder/event';
+import { IndexerRepository } from '../database/sqlite';
 import {
   recordTxProcessed,
   recordTxLatency,
@@ -21,7 +21,7 @@ import {
   setSlotLag,
   recordEventDecoded,
   recordInstructionIndexed,
-} from './metrics';
+} from '../observability/metrics';
 
 export interface BatchOptions {
   fromSlot?: number;

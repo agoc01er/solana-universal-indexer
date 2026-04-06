@@ -7,8 +7,8 @@
  * The adapter interface is identical to the SQLite path,
  * so switching is a single env var change.
  */
-import { logger } from './logger';
-import { AnchorIdl, generateSchemaSQL, getInstructionTableName, getAccountTableName } from './idl';
+import { logger } from '../observability/logger';
+import { AnchorIdl, generateSchemaSQL, getInstructionTableName, getAccountTableName } from '../idl/parser';
 
 export interface PgConfig {
   connectionString: string;

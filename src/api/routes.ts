@@ -1,9 +1,9 @@
 import express, { Request, Response } from 'express';
-import { SolanaIndexer } from './indexer';
-import { IndexerRepository } from './db';
-import { AnchorIdl } from './idl';
-import { metrics } from './metrics';
-import { logger } from './logger';
+import { SolanaIndexer } from '../indexer/indexer';
+import { IndexerRepository } from '../database/sqlite';
+import { AnchorIdl } from '../idl/parser';
+import { metrics } from '../observability/metrics';
+import { logger } from '../observability/logger';
 
 export function createApp(
   repo: IndexerRepository,

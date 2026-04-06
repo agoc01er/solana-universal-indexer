@@ -4,8 +4,8 @@
  *
  * Falls back to manual discriminator matching if anchor is unavailable.
  */
-import { AnchorIdl, IdlInstruction, computeDiscriminator } from './idl';
-import { logger } from './logger';
+import { AnchorIdl, IdlInstruction, computeDiscriminator } from '../idl/parser';
+import { logger } from '../observability/logger';
 
 export interface DecodedInstruction {
   name: string;
@@ -112,7 +112,7 @@ export class InstructionDecoder {
 
   private fallbackDecodeArgs(idlIx: IdlInstruction, rawData: Buffer): Record<string, any> {
     // Import inline to avoid circular deps
-    const { decodeInstructionArgs } = require('./idl');
+    const { decodeInstructionArgs } = require('../idl/parser');
     const decoded = decodeInstructionArgs(idlIx.args, rawData);
     return decoded;
   }

@@ -8,8 +8,8 @@
  */
 import * as crypto from 'crypto';
 import { Connection, PublicKey } from '@solana/web3.js';
-import { AnchorIdl, generateSchemaSQL } from './idl';
-import { logger } from './logger';
+import { AnchorIdl, generateSchemaSQL } from '../idl/parser';
+import { logger } from '../observability/logger';
 
 export interface IdlVersion {
   programId: string;

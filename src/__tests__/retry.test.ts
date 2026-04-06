@@ -1,4 +1,4 @@
-import { withRetry, sleep } from '../retry';
+import { withRetry, sleep } from '../utils/retry';
 
 describe('withRetry', () => {
   test('returns result on first success', async () => {

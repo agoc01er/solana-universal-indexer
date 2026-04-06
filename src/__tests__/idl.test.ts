@@ -6,7 +6,7 @@ import {
   generateSchemaSQL,
   getInstructionTableName,
   AnchorIdl,
-} from '../idl';
+} from '../idl/parser';
 
 const mockIdl: AnchorIdl = {
   name: 'test_program',

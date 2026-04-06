@@ -1,6 +1,6 @@
 import * as crypto from 'crypto';
-import { EventDecoder } from '../events';
-import { AnchorIdl } from '../idl';
+import { EventDecoder } from '../decoder/event';
+import { AnchorIdl } from '../idl/parser';
 
 // Mock IDL with events
 const mockIdl: AnchorIdl & { events: any[] } = {

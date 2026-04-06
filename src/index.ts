@@ -1,13 +1,13 @@
 import * as fs from 'fs';
 import { PublicKey } from '@solana/web3.js';
-import { AnchorIdl } from './idl';
-import { createDb } from './db';
-import { SolanaIndexer } from './indexer';
-import { createApp } from './api';
-import { AccountWatcher } from './account-watcher';
-import { IdlVersionManager } from './idl-version';
+import { AnchorIdl } from './idl/parser';
+import { createDb } from './database/sqlite';
+import { SolanaIndexer } from './indexer/indexer';
+import { createApp } from './api/routes';
+import { AccountWatcher } from './indexer/account-watcher';
+import { IdlVersionManager } from './database/migrations';
 import { config } from './config';
-import { logger } from './logger';
+import { logger } from './observability/logger';
 
 function loadIdl(): AnchorIdl {
   const idlPath = config.IDL_PATH;
@@ -60,7 +60,7 @@ async function main() {
 
   if (config.DB_TYPE === 'postgres' && config.DATABASE_URL) {
     logger.info('Using PostgreSQL backend');
-    const { PostgresRepository } = await import('./pg-adapter');
+    const { PostgresRepository } = await import('./database/postgres');
     repo = new PostgresRepository({ connectionString: config.DATABASE_URL, idl });
     await repo.init();
   } else {

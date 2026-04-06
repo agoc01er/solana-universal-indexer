@@ -1,8 +1,8 @@
 /**
  * Database repository with SQL injection protection and cursor-based pagination.
  */
-import { logger } from './logger';
-import { AnchorIdl, generateSchemaSQL, getInstructionTableName, getAccountTableName } from './idl';
+import { logger } from '../observability/logger';
+import { AnchorIdl, generateSchemaSQL, getInstructionTableName, getAccountTableName } from '../idl/parser';
 
 // Safe column name pattern — prevents SQL injection
 const SAFE_COL = /^[a-z_][a-z0-9_]*$/;

@@ -8,8 +8,8 @@
  * Decodes Anchor emit!() events from transaction logs.
  */
 import * as crypto from 'crypto';
-import { AnchorIdl, IdlField, decodeField } from './idl';
-import { logger } from './logger';
+import { AnchorIdl, IdlField, decodeField } from '../idl/parser';
+import { logger } from '../observability/logger';
 
 export interface IdlEvent {
   name: string;

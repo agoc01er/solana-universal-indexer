@@ -11,12 +11,12 @@
  * subscriptions (real-time) for completeness.
  */
 import { Connection, PublicKey, KeyedAccountInfo, Context } from '@solana/web3.js';
-import { AnchorIdl } from './idl';
-import { AccountDecoder } from './decoder';
-import { IndexerRepository } from './db';
-import { withRetry, sleep } from './retry';
-import { logger } from './logger';
-import { metrics } from './metrics';
+import { AnchorIdl } from '../idl/parser';
+import { AccountDecoder } from '../decoder/instruction';
+import { IndexerRepository } from '../database/sqlite';
+import { withRetry, sleep } from '../utils/retry';
+import { logger } from '../observability/logger';
+import { metrics } from '../observability/metrics';
 
 export class AccountWatcher {
   private connection: Connection;
@@ -87,7 +87,7 @@ export class AccountWatcher {
 
   private async syncAccountType(accountTypeName: string, slot: number): Promise<number> {
     // Get discriminator for this account type
-    const { computeDiscriminator } = await import('./idl');
+    const { computeDiscriminator } = await import('../idl/parser');
     // Anchor account discriminator: sha256("account:<AccountName>")[0..8]
     const crypto = require('crypto');
     const disc = crypto.createHash('sha256')

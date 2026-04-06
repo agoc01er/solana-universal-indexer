@@ -155,17 +155,27 @@ export class IdlVersionManager {
       const accountInfo = await connection.getAccountInfo(idlAddress);
       if (!accountInfo?.data) return null;
 
-      // IDL account data: 8 bytes header + 4 bytes length + compressed IDL JSON
+      // IDL account data layout:
+      // 8 bytes discriminator + 32 bytes authority + 4 bytes data length + data (zlib-compressed)
       const data = accountInfo.data;
-      if (data.length < 12) return null;
+      if (data.length < 44) return null;
 
-      // Skip 8-byte discriminator + 4-byte authority length
-      const idlDataStart = 8 + 4 + 32; // discriminator + authority pubkey
+      const idlDataStart = 8 + 32; // discriminator + authority pubkey
       const idlLength = data.readUInt32LE(idlDataStart);
       const idlBytes = data.slice(idlDataStart + 4, idlDataStart + 4 + idlLength);
 
-      const idlJson = JSON.parse(idlBytes.toString('utf8'));
-      logger.info('IDL fetched from chain', { programId });
+      // Try to decompress (Anchor stores IDL as zlib-compressed JSON)
+      let idlJson: AnchorIdl;
+      try {
+        const zlib = require('zlib');
+        const decompressed = zlib.inflateSync(idlBytes);
+        idlJson = JSON.parse(decompressed.toString('utf8'));
+      } catch {
+        // Fallback: try raw JSON (some older programs may store uncompressed)
+        idlJson = JSON.parse(idlBytes.toString('utf8'));
+      }
+
+      logger.info('IDL fetched from chain', { programId, name: idlJson.name });
       return idlJson;
     } catch (err: any) {
       logger.debug('Could not fetch IDL from chain', { programId, error: err.message });

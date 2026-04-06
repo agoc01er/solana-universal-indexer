@@ -360,5 +360,4 @@ Test suites cover:
 - **No Geyser/Yellowstone support** — relies on standard RPC endpoints. Geyser plugins would improve throughput for high-volume programs but add infrastructure complexity.
 - **Account history tables grow unbounded** — the append-only `acc_history_*` tables need manual cleanup or TTL policies for long-running deployments.
 - **Manual Borsh decoder is partial** — nested custom types (`defined` in IDL) fall back to null. The BorshCoder from `@coral-xyz/anchor` handles these correctly when available.
-- **PostgreSQL adapter uses OFFSET pagination** — the cursor-based pagination is currently SQLite-only. The PG adapter falls back to OFFSET/LIMIT. This is a known inconsistency that should be addressed.
-- **On-chain IDL fetch without decompression** — the `fetchFromChain` method doesn't handle zlib-compressed IDL data stored on-chain.
+

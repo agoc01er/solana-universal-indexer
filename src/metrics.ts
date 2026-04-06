@@ -1,6 +1,5 @@
 /**
- * Prometheus metrics — unique feature none of the competitors have.
- * Exposes /metrics endpoint for operational monitoring.
+ * Exposes Prometheus-compatible /metrics endpoint for operational monitoring.
  */
 
 interface Counter {

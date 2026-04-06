@@ -5,7 +5,7 @@
  * These are encoded in transaction logs as base64 data prefixed with "Program data: ".
  * First 8 bytes = sha256("event:<EventName>")[0..8] discriminator.
  *
- * This is a UNIQUE feature — no other competitor decodes Anchor events.
+ * Decodes Anchor emit!() events from transaction logs.
  */
 import * as crypto from 'crypto';
 import { AnchorIdl, IdlField, decodeField } from './idl';

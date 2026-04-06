@@ -24,7 +24,7 @@ export function createApp(
     });
   });
 
-  // ── Prometheus metrics (UNIQUE FEATURE) ────────────────────────────────────
+  // ── Prometheus metrics ─────────────────────────────────────────────────────
   app.get('/metrics', (_req: Request, res: Response) => {
     res.set('Content-Type', 'text/plain; version=0.0.4');
     res.send(metrics.render());
@@ -76,7 +76,7 @@ export function createApp(
     }
   });
 
-  // ── Anchor Events (UNIQUE FEATURE) ─────────────────────────────────────────
+  // ── Anchor Events ──────────────────────────────────────────────────────────
   // GET /events?name=SwapExecuted&slot_from=&slot_to=&cursor=&limit=
   app.get('/events', (req: Request, res: Response) => {
     const eventName = req.query.name as string | undefined;

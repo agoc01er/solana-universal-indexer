@@ -4,7 +4,7 @@
  * Real Anchor programs upgrade over time. This module tracks IDL versions
  * and applies schema migrations when the program's IDL changes.
  *
- * Unique feature: no competitor handles IDL upgrades.
+ * Tracks IDL version changes and applies schema migrations automatically.
  */
 import * as crypto from 'crypto';
 import { Connection, PublicKey } from '@solana/web3.js';

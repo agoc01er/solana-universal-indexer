@@ -131,7 +131,7 @@ export class SolanaIndexer {
     const accountKeyStrings = accountKeys.map((k: any) => k.pubkey?.toString() ?? '');
     const logs = tx.meta.logMessages ?? [];
 
-    // ── Decode Anchor events (UNIQUE FEATURE) ────────────────────────────────
+    // ── Decode Anchor events from program logs ────────────────────────────────
     if (this.eventDecoder.hasEvents) {
       const events = this.eventDecoder.decodeFromLogs(logs, slot, signature);
       for (const event of events) {

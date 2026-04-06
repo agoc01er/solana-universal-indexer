@@ -7,8 +7,8 @@
  * 3. Subscribes to account changes via WebSocket (accountSubscribe)
  * 4. Re-syncs periodically to catch any missed updates
  *
- * Approach differs from competitors: we use both getProgramAccounts (bulk)
- * AND per-account WebSocket subscriptions (real-time) for completeness.
+ * Uses both getProgramAccounts (bulk) and per-account WebSocket
+ * subscriptions (real-time) for completeness.
  */
 import { Connection, PublicKey, KeyedAccountInfo, Context } from '@solana/web3.js';
 import { AnchorIdl } from './idl';

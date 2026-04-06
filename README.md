@@ -4,7 +4,7 @@ A production-ready Solana indexer that works with any Anchor program. Provide an
 
 Supports **PostgreSQL** for production workloads and **SQLite** for lightweight deployments. Includes a **real-time web dashboard** at `/dashboard`.
 
-![Tests](https://img.shields.io/badge/tests-95%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -371,11 +371,11 @@ Upsert-only snapshots lose the ability to track how account state evolved over t
 ## Running tests
 
 ```bash
-npm test                 # 95 tests across 7 suites
+npm test                 # 96 tests across 7 suites
 npm run test:coverage    # with coverage report
 ```
 
-**95 tests across 7 suites:**
+**96 tests across 7 suites:**
 
 | Suite | Tests | What is covered |
 |-------|-------|-----------------|
@@ -383,7 +383,7 @@ npm run test:coverage    # with coverage report
 | `db.test.ts` | 28 | CRUD, cursor pagination, slot filtering, SQL injection protection, deduplication |
 | `idl.test.ts` | 11 | Discriminator computation, Borsh decoding (u8–u128, strings), schema SQL generation |
 | `events.test.ts` | 8 | Anchor event decoding, discriminator matching, malformed data handling |
-| `metrics.test.ts` | 9 | Counter/gauge/histogram rendering, Prometheus text format |
+| `metrics.test.ts` | 10 | Counter/gauge/histogram rendering, Prometheus text format, HELP/TYPE deduplication per metric family |
 | `config.test.ts` | 7 | Required fields, invalid modes, DB type validation, port ranges |
 | `retry.test.ts` | 4 | Exponential backoff, max attempts, full jitter |
 

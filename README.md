@@ -102,27 +102,39 @@ src/
 
 ## Quick start
 
-### Docker (PostgreSQL — recommended)
+### Docker (PostgreSQL — recommended for production)
 
 ```bash
 git clone https://github.com/agoc01er/solana-universal-indexer
 cd solana-universal-indexer
-cp .env.example .env        # set PROGRAM_ID
+cp .env.example .env        # edit PROGRAM_ID and RPC_URL
 cp your-program.json idl.json
 docker compose up
 ```
 
-### Docker (SQLite — no database server needed)
+The `idl.json` included in the repo is the **Jupiter v6 aggregator IDL** — `docker compose up` works out of the box with no changes if you just want to try it.
+
+### Docker (SQLite — zero external dependencies)
 
 ```bash
-docker compose --profile sqlite up
+# Only starts the SQLite indexer, no PostgreSQL server needed
+docker compose --profile sqlite up indexer-sqlite
 ```
 
-### Local
+### Local (PostgreSQL)
+
+```bash
+npm install
+cp .env.example .env        # configure DATABASE_URL
+npm run dev
+```
+
+### Local (SQLite — fastest way to try it)
 
 ```bash
 npm install
 cp .env.example .env
+# Edit .env: set DB_TYPE=sqlite and DB_PATH=./indexer.db
 npm run dev
 ```
 

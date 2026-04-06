@@ -24,7 +24,7 @@ services:
     ports:
       - "3000:3000"
     environment:
-      - PROGRAM_ID=${PROGRAM_ID}
+      - PROGRAM_ID=${PROGRAM_ID:-JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4}
       - RPC_URL=${RPC_URL:-https://api.mainnet-beta.solana.com}
       - WS_URL=${WS_URL:-}
       - IDL_PATH=/app/idl.json
@@ -49,12 +49,13 @@ services:
       start_period: 15s
 
   # ── Indexer (SQLite mode — lightweight, no external deps) ───────────────────
+  # Usage: docker compose --profile sqlite up indexer-sqlite
   indexer-sqlite:
     build: .
     ports:
       - "3000:3000"
     environment:
-      - PROGRAM_ID=${PROGRAM_ID}
+      - PROGRAM_ID=${PROGRAM_ID:-JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4}
       - RPC_URL=${RPC_URL:-https://api.mainnet-beta.solana.com}
       - WS_URL=${WS_URL:-}
       - IDL_PATH=/app/idl.json

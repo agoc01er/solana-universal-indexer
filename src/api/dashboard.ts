@@ -405,10 +405,10 @@ function getDashboardHtml(): string {
         <table>
           <thead>
             <tr>
-              <th>Signature</th>
-              <th>Instruction</th>
-              <th>Slot</th>
-              <th>Time</th>
+              <th>SIGNATURE</th>
+              <th>INSTRUCTION</th>
+              <th>SLOT</th>
+              <th>TIME</th>
             </tr>
           </thead>
           <tbody id="txTable">
@@ -511,7 +511,9 @@ function getDashboardHtml(): string {
     async function loadStats() {
       try {
         const stats = await fetchJSON(API + '/stats');
-        const counts = stats.instructions || [];
+        const counts = stats.instructions
+          ? Object.entries(stats.instructions).map(([name, v]) => ({ name, count: v.total || 0 }))
+          : [];
         el('countsList').innerHTML = counts.length
           ? counts.map(item =>
               '<div class="schema-item">' +

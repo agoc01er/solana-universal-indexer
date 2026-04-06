@@ -1,0 +1,115 @@
+{
+  "name": "jupiter_aggregator_v6",
+  "version": "0.1.0",
+  "instructions": [
+    {
+      "name": "route",
+      "accounts": [
+        { "name": "tokenProgram", "isMut": false, "isSigner": false },
+        { "name": "userTransferAuthority", "isMut": false, "isSigner": true },
+        { "name": "userSourceTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "userDestinationTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "destinationTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "destinationMint", "isMut": false, "isSigner": false },
+        { "name": "platformFeeAccount", "isMut": true, "isSigner": false },
+        { "name": "eventAuthority", "isMut": false, "isSigner": false },
+        { "name": "program", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "routePlan", "type": { "vec": { "defined": "RoutePlanStep" } } },
+        { "name": "inAmount", "type": "u64" },
+        { "name": "quotedOutAmount", "type": "u64" },
+        { "name": "slippageBps", "type": "u16" },
+        { "name": "platformFeeBps", "type": "u8" }
+      ]
+    },
+    {
+      "name": "exactOutRoute",
+      "accounts": [
+        { "name": "tokenProgram", "isMut": false, "isSigner": false },
+        { "name": "userTransferAuthority", "isMut": false, "isSigner": true },
+        { "name": "userSourceTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "userDestinationTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "destinationTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "destinationMint", "isMut": false, "isSigner": false },
+        { "name": "platformFeeAccount", "isMut": true, "isSigner": false },
+        { "name": "eventAuthority", "isMut": false, "isSigner": false },
+        { "name": "program", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "routePlan", "type": { "vec": { "defined": "RoutePlanStep" } } },
+        { "name": "outAmount", "type": "u64" },
+        { "name": "quotedInAmount", "type": "u64" },
+        { "name": "slippageBps", "type": "u16" },
+        { "name": "platformFeeBps", "type": "u8" }
+      ]
+    },
+    {
+      "name": "sharedAccountsRoute",
+      "accounts": [
+        { "name": "tokenProgram", "isMut": false, "isSigner": false },
+        { "name": "programAuthority", "isMut": false, "isSigner": false },
+        { "name": "userTransferAuthority", "isMut": false, "isSigner": true },
+        { "name": "sourceTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "programSourceTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "programDestinationTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "destinationTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "sourceMint", "isMut": false, "isSigner": false },
+        { "name": "destinationMint", "isMut": false, "isSigner": false },
+        { "name": "platformFeeAccount", "isMut": true, "isSigner": false },
+        { "name": "token2022Program", "isMut": false, "isSigner": false },
+        { "name": "eventAuthority", "isMut": false, "isSigner": false },
+        { "name": "program", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "id", "type": "u8" },
+        { "name": "routePlan", "type": { "vec": { "defined": "RoutePlanStep" } } },
+        { "name": "inAmount", "type": "u64" },
+        { "name": "quotedOutAmount", "type": "u64" },
+        { "name": "slippageBps", "type": "u16" },
+        { "name": "platformFeeBps", "type": "u8" }
+      ]
+    },
+    {
+      "name": "sharedAccountsExactOutRoute",
+      "accounts": [
+        { "name": "tokenProgram", "isMut": false, "isSigner": false },
+        { "name": "programAuthority", "isMut": false, "isSigner": false },
+        { "name": "userTransferAuthority", "isMut": false, "isSigner": true },
+        { "name": "sourceTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "programSourceTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "programDestinationTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "destinationTokenAccount", "isMut": true, "isSigner": false },
+        { "name": "sourceMint", "isMut": false, "isSigner": false },
+        { "name": "destinationMint", "isMut": false, "isSigner": false },
+        { "name": "platformFeeAccount", "isMut": true, "isSigner": false },
+        { "name": "token2022Program", "isMut": false, "isSigner": false },
+        { "name": "eventAuthority", "isMut": false, "isSigner": false },
+        { "name": "program", "isMut": false, "isSigner": false }
+      ],
+      "args": [
+        { "name": "id", "type": "u8" },
+        { "name": "routePlan", "type": { "vec": { "defined": "RoutePlanStep" } } },
+        { "name": "outAmount", "type": "u64" },
+        { "name": "quotedInAmount", "type": "u64" },
+        { "name": "slippageBps", "type": "u16" },
+        { "name": "platformFeeBps", "type": "u8" }
+      ]
+    }
+  ],
+  "accounts": [],
+  "types": [
+    {
+      "name": "RoutePlanStep",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          { "name": "ammKey", "type": "publicKey" },
+          { "name": "inputIndex", "type": "u8" },
+          { "name": "outputIndex", "type": "u8" },
+          { "name": "percent", "type": "u8" }
+        ]
+      }
+    }
+  ]
+}

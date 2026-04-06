@@ -129,7 +129,7 @@ async function main() {
   }
 
   // ── API server ────────────────────────────────────────────────────────────
-  const app = createApp(repo, indexer, idl);
+  const app = createApp(repo, indexer, idl, config.PROGRAM_ID);
   const server = app.listen(config.PORT, () => {
     logger.info('API server ready', {
       port: config.PORT,

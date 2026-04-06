@@ -9,7 +9,8 @@ import { createDashboardRouter } from './dashboard';
 export function createApp(
   repo: IndexerRepository,
   indexer: SolanaIndexer,
-  idl: AnchorIdl
+  idl: AnchorIdl,
+  programId?: string
 ) {
   const app = express();
   app.use(express.json());
@@ -22,6 +23,7 @@ export function createApp(
       status: ready ? 'ok' : 'degraded',
       ready,
       program: idl.name,
+      programId: programId || null,
       indexerRunning: indexer.isRunning,
       lastSlot: repo.getLastProcessedSlot(),
       uptime: process.uptime(),
@@ -68,6 +70,11 @@ export function createApp(
       return res.status(404).json({ error: `Unknown instruction: ${req.params.name}` });
     }
 
+    const rawLimit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+    if (req.query.limit && (isNaN(rawLimit) || rawLimit < 1)) {
+      return res.status(400).json({ error: 'Invalid limit: must be a positive integer' });
+    }
+
     const filters: Record<string, any> = {};
     for (const [k, v] of Object.entries(req.query)) {
       if (['cursor', 'limit'].includes(k)) continue;
@@ -76,7 +83,7 @@ export function createApp(
 
     try {
       const result = repo.queryInstructions(req.params.name, filters, {
-        limit: req.query.limit ? parseInt(req.query.limit as string) : 50,
+        limit: rawLimit,
         cursor: req.query.cursor as string | undefined,
       });
       res.json(result);
@@ -112,6 +119,9 @@ export function createApp(
     if (!ixDef) return res.status(404).json({ error: `Unknown instruction: ${req.params.instruction}` });
 
     const groupBy = (req.query.group_by as string || 'total') as 'hour' | 'day' | 'total';
+    if (!['hour', 'day', 'total'].includes(groupBy)) {
+      return res.status(400).json({ error: `Invalid group_by: ${groupBy}. Use hour, day, or total` });
+    }
     const op = (req.query.op as string || 'count') as 'count' | 'sum' | 'avg' | 'min' | 'max';
     const field = req.query.field as string | undefined;
     const slotFrom = req.query.slot_from ? parseInt(req.query.slot_from as string) : undefined;
@@ -151,7 +161,10 @@ export function createApp(
 
   // ── Manual batch trigger ───────────────────────────────────────────────────
   app.post('/index/batch', async (req: Request, res: Response) => {
-    const { fromSlot, toSlot, signatures } = req.body;
+    const { fromSlot, toSlot, signatures } = req.body ?? {};
+    if (!fromSlot && !toSlot && !signatures?.length) {
+      return res.status(400).json({ error: 'Provide fromSlot+toSlot or signatures[]' });
+    }
     try {
       const count = await indexer.runBatch({ fromSlot, toSlot, signatures });
       res.json({ indexed: count });

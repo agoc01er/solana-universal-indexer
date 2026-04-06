@@ -330,23 +330,37 @@ export class SolanaIndexer {
     const lastSlot = this.repo.getLastProcessedSlot();
     logger.info('Backfilling', { fromSlot: lastSlot });
 
+    // Skip backfill if slot is in future (e.g. seeded for testing)
+    const MAX_BACKFILL_SIGS = 200;
     const allNew: ConfirmedSignatureInfo[] = [];
     let before: string | undefined;
 
-    while (!this.shutdownRequested) {
-      const page = await this.fetchSignatures({ before, limit: 100 });
-      if (!page.length) break;
-      const newInPage = page.filter(s => s.slot > lastSlot);
-      allNew.push(...newInPage);
-      if (newInPage.length < page.length) break;
-      before = page[page.length - 1].signature;
+    try {
+      while (!this.shutdownRequested && allNew.length < MAX_BACKFILL_SIGS) {
+        const page = await this.fetchSignatures({ before, limit: 100 });
+        if (!page.length) break;
+        const newInPage = page.filter(s => s.slot > lastSlot);
+        allNew.push(...newInPage);
+        if (newInPage.length < page.length) break;
+        before = page[page.length - 1].signature;
+        if (allNew.length >= MAX_BACKFILL_SIGS) {
+          logger.warn('Backfill cap reached, switching to realtime', { collected: allNew.length });
+          break;
+        }
+      }
+    } catch (err: any) {
+      logger.warn('Backfill interrupted (rate-limit?), switching to realtime', { error: err.message });
     }
 
     for (const sigInfo of allNew.reverse()) {
       if (this.shutdownRequested) break;
-      const tx = await this.fetchTx(sigInfo.signature);
-      if (tx) this.processTx(tx, sigInfo.signature);
-      await sleep(50);
+      try {
+        const tx = await this.fetchTx(sigInfo.signature);
+        if (tx) this.processTx(tx, sigInfo.signature);
+      } catch (err: any) {
+        logger.warn('Backfill tx fetch failed, skipping', { sig: sigInfo.signature, error: err.message });
+      }
+      await sleep(100);
     }
 
     logger.info('Backfill complete', { count: allNew.length, slot: this.repo.getLastProcessedSlot() });

@@ -2,7 +2,11 @@
 
 A production-ready Solana indexer that works with any Anchor program. Provide an IDL file, set a program ID, and the indexer handles everything: schema generation, transaction decoding, account state tracking, event parsing, and a REST API — without writing program-specific code.
 
-Supports **PostgreSQL** for production workloads and **SQLite** for lightweight deployments.
+Supports **PostgreSQL** for production workloads and **SQLite** for lightweight deployments. Includes a **real-time web dashboard** at `/dashboard`.
+
+![Tests](https://img.shields.io/badge/tests-95%20passing-brightgreen)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.x-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
@@ -121,6 +125,22 @@ npm install
 cp .env.example .env
 npm run dev
 ```
+
+**Windows one-click:** double-click `start.bat` — it checks `.env`, installs dependencies, builds, and starts the server automatically.
+
+---
+
+## Dashboard
+
+Once running, open **http://localhost:3000/dashboard** for a live overview:
+
+- **Program stats** — name, instruction type count, last indexed slot, uptime
+- **Instructions Schema** — all instruction types from the IDL with account and argument details
+- **Indexed Counts** — real-time row counts per instruction type
+- **Recent Transactions** — latest indexed transactions with signature, instruction type, slot, and time
+- **Health Details** — service status, program ID, indexer running state
+
+The dashboard polls all API endpoints every 10 seconds with no page reload required.
 
 ---
 
@@ -339,18 +359,21 @@ Upsert-only snapshots lose the ability to track how account state evolved over t
 ## Running tests
 
 ```bash
-npm test
+npm test                 # 95 tests across 7 suites
+npm run test:coverage    # with coverage report
 ```
 
-Test suites cover:
-- **IDL**: discriminator computation, Borsh decoding (u8–u128, strings, options, arrays), schema generation
-- **Database**: CRUD operations, cursor pagination, slot filtering, SQL injection protection, deduplication
-- **Aggregation**: COUNT, SUM, AVG, MIN, MAX on numeric fields, time-based grouping, unsafe field rejection
-- **Account history**: append-only inserts, query ordering, limit/offset
-- **Events**: Anchor event decoding, discriminator matching, malformed data handling
-- **Retry**: exponential backoff, max attempts, jitter
-- **Metrics**: counter/gauge/histogram rendering, Prometheus text format validation
-- **Config**: validation of required fields, invalid modes, port ranges
+**95 tests across 7 suites:**
+
+| Suite | Tests | What is covered |
+|-------|-------|-----------------|
+| `dashboard.test.ts` | 26 | HTTP 200, HTML structure, all UI sections, CSS colors, JS auto-refresh, API calls, offline handling, size bounds |
+| `db.test.ts` | 28 | CRUD, cursor pagination, slot filtering, SQL injection protection, deduplication |
+| `idl.test.ts` | 11 | Discriminator computation, Borsh decoding (u8–u128, strings), schema SQL generation |
+| `events.test.ts` | 8 | Anchor event decoding, discriminator matching, malformed data handling |
+| `metrics.test.ts` | 9 | Counter/gauge/histogram rendering, Prometheus text format |
+| `config.test.ts` | 7 | Required fields, invalid modes, DB type validation, port ranges |
+| `retry.test.ts` | 4 | Exponential backoff, max attempts, full jitter |
 
 ---
 

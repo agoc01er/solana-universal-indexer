@@ -154,4 +154,87 @@ describe('IndexerRepository', () => {
       repo.queryInstructions('swap', { 'DROP TABLE--': 'x' }, {});
     }).not.toThrow(); // unsafe key should be silently ignored (not throw)
   });
+
+  // ── Extended aggregation tests ──────────────────────────────────────────────
+
+  test('aggregate: default count returns total', () => {
+    repo.insertInstruction('swap', 'agg1', 100, null, {}, { amountIn: '500' }, { cpiDepth: 0, parentIxIndex: null });
+    repo.insertInstruction('swap', 'agg2', 200, null, {}, { amountIn: '300' }, { cpiDepth: 0, parentIxIndex: null });
+    const result = repo.aggregate('swap', 'total');
+    expect(result.length).toBe(1);
+    expect(result[0].total_calls).toBe(2);
+  });
+
+  test('aggregate: sum on numeric field', () => {
+    const r = makeRepo();
+    r.insertInstruction('swap', 's1', 100, null, {}, { amountIn: '500' }, { cpiDepth: 0, parentIxIndex: null });
+    r.insertInstruction('swap', 's2', 200, null, {}, { amountIn: '300' }, { cpiDepth: 0, parentIxIndex: null });
+    const result = r.aggregate('swap', 'total', undefined, undefined, 'sum', 'arg_amountin');
+    expect(result[0].value).toBe(800);
+  });
+
+  test('aggregate: avg on numeric field', () => {
+    const r = makeRepo();
+    r.insertInstruction('swap', 's1', 100, null, {}, { amountIn: '400' }, { cpiDepth: 0, parentIxIndex: null });
+    r.insertInstruction('swap', 's2', 200, null, {}, { amountIn: '600' }, { cpiDepth: 0, parentIxIndex: null });
+    const result = r.aggregate('swap', 'total', undefined, undefined, 'avg', 'arg_amountin');
+    expect(result[0].value).toBe(500);
+  });
+
+  test('aggregate: min/max on numeric field', () => {
+    const r = makeRepo();
+    r.insertInstruction('swap', 's1', 100, null, {}, { amountIn: '100' }, { cpiDepth: 0, parentIxIndex: null });
+    r.insertInstruction('swap', 's2', 200, null, {}, { amountIn: '900' }, { cpiDepth: 0, parentIxIndex: null });
+    const min = r.aggregate('swap', 'total', undefined, undefined, 'min', 'arg_amountin');
+    const max = r.aggregate('swap', 'total', undefined, undefined, 'max', 'arg_amountin');
+    expect(min[0].value).toBe(100);
+    expect(max[0].value).toBe(900);
+  });
+
+  test('aggregate: rejects unsafe field name', () => {
+    expect(() => {
+      repo.aggregate('swap', 'total', undefined, undefined, 'sum', 'DROP TABLE');
+    }).toThrow('Unsafe field name');
+  });
+
+  test('aggregate: group_by hour returns buckets', () => {
+    const r = makeRepo();
+    r.insertInstruction('swap', 'h1', 9000, null, {}, {}, { cpiDepth: 0, parentIxIndex: null });
+    r.insertInstruction('swap', 'h2', 18000, null, {}, {}, { cpiDepth: 0, parentIxIndex: null });
+    const result = r.aggregate('swap', 'hour');
+    expect(result.length).toBeGreaterThan(0);
+  });
+
+  // ── Account history tests ─────────────────────────────────────────────────
+
+  test('insertAccountHistory: appends records (not upserts)', () => {
+    repo.insertAccountHistory('PoolState', 'pubkey1', 100, { totalLiquidity: '5000', fee: '30' });
+    repo.insertAccountHistory('PoolState', 'pubkey1', 200, { totalLiquidity: '6000', fee: '25' });
+    repo.insertAccountHistory('PoolState', 'pubkey1', 300, { totalLiquidity: '7000', fee: '20' });
+    const history = repo.queryAccountHistory('PoolState', 'pubkey1');
+    expect(history.length).toBe(3);
+    // Latest first (DESC order)
+    expect(history[0].slot).toBe(300);
+    expect(history[2].slot).toBe(100);
+  });
+
+  test('queryAccountHistory: respects limit', () => {
+    const r = makeRepo();
+    for (let i = 0; i < 10; i++) {
+      r.insertAccountHistory('PoolState', 'pk', i * 100, { totalLiquidity: String(i * 1000) });
+    }
+    const history = r.queryAccountHistory('PoolState', 'pk', { limit: 3 });
+    expect(history.length).toBe(3);
+  });
+
+  test('queryAccountHistory: returns empty for unknown pubkey', () => {
+    const history = repo.queryAccountHistory('PoolState', 'nonexistent');
+    expect(history).toEqual([]);
+  });
+
+  // ── Readiness check ────────────────────────────────────────────────────────
+
+  test('isReady: returns true for healthy db', () => {
+    expect(repo.isReady()).toBe(true);
+  });
 });

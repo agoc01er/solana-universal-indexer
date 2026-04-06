@@ -238,13 +238,15 @@ export class IndexerRepository {
     };
   }
 
-  // ── Aggregation ───────────────────────────────────────────────────────────
+  // ── Aggregation (extended: SUM/AVG/MIN/MAX) ────────────────────────────────
 
   aggregate(
     instructionName: string,
     groupBy: 'hour' | 'day' | 'total',
     slotFrom?: number,
-    slotTo?: number
+    slotTo?: number,
+    op: 'count' | 'sum' | 'avg' | 'min' | 'max' = 'count',
+    field?: string
   ): any[] {
     const tableName = getInstructionTableName(this.idl.name, instructionName);
     const conditions: string[] = [];
@@ -254,19 +256,92 @@ export class IndexerRepository {
     if (slotTo) { conditions.push('slot <= ?'); params.push(slotTo); }
     const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
 
+    // Build the aggregation expression
+    let aggExpr = 'COUNT(*)';
+    if (op !== 'count' && field) {
+      if (!SAFE_COL.test(field)) throw new Error(`Unsafe field name: ${field}`);
+      // CAST to REAL for numeric operations on TEXT columns
+      const col = safeCol(field);
+      aggExpr = `${op.toUpperCase()}(CAST(${col} AS REAL))`;
+    }
+
     if (groupBy === 'hour') {
+      // Group by block_time hour if available, fallback to slot buckets
       return this.db.prepare(
-        `SELECT (slot / 9000) as bucket, COUNT(*) as count FROM "${tableName}" ${where} GROUP BY bucket ORDER BY bucket DESC LIMIT 168`
+        `SELECT COALESCE(block_time / 3600, slot / 9000) as bucket, ${aggExpr} as value, COUNT(*) as count FROM "${tableName}" ${where} GROUP BY bucket ORDER BY bucket DESC LIMIT 168`
       ).all(...params);
     }
     if (groupBy === 'day') {
       return this.db.prepare(
-        `SELECT (slot / 216000) as bucket, COUNT(*) as count FROM "${tableName}" ${where} GROUP BY bucket ORDER BY bucket DESC LIMIT 30`
+        `SELECT COALESCE(block_time / 86400, slot / 216000) as bucket, ${aggExpr} as value, COUNT(*) as count FROM "${tableName}" ${where} GROUP BY bucket ORDER BY bucket DESC LIMIT 30`
       ).all(...params);
     }
     return this.db.prepare(
-      `SELECT COUNT(*) as total_calls, MIN(slot) as first_slot, MAX(slot) as last_slot FROM "${tableName}" ${where}`
+      `SELECT ${aggExpr} as value, COUNT(*) as total_calls, MIN(slot) as first_slot, MAX(slot) as last_slot FROM "${tableName}" ${where}`
     ).all(...params);
+  }
+
+  // ── Account history (append-only log) ─────────────────────────────────────
+
+  insertAccountHistory(
+    accountTypeName: string,
+    pubkey: string,
+    slot: number,
+    data: Record<string, any>
+  ) {
+    const tableName = `acc_history_${this.idl.name}_${accountTypeName}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+
+    // Create history table lazily
+    const cols = [
+      '  id INTEGER PRIMARY KEY AUTOINCREMENT',
+      '  pubkey TEXT NOT NULL',
+      '  slot INTEGER NOT NULL',
+      ...Object.keys(data).map(k => `  "${k.toLowerCase().replace(/[^a-z0-9_]/g, '_')}" TEXT`),
+      '  recorded_at INTEGER NOT NULL',
+    ];
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS "${tableName}" (
+      ${cols.join(',\n')}
+      );
+      CREATE INDEX IF NOT EXISTS "idx_${tableName}_pubkey" ON "${tableName}"(pubkey, slot DESC);
+    `);
+
+    const row: Record<string, any> = { pubkey, slot, recorded_at: Date.now() };
+    for (const [k, v] of Object.entries(data)) {
+      row[k.toLowerCase().replace(/[^a-z0-9_]/g, '_')] = v !== null ? String(v) : null;
+    }
+    const rowCols = Object.keys(row);
+    this.db.prepare(
+      `INSERT INTO "${tableName}" (${rowCols.map(c => `"${c}"`).join(', ')}) VALUES (${rowCols.map(() => '?').join(', ')})`
+    ).run(...rowCols.map(c => row[c]));
+  }
+
+  queryAccountHistory(
+    accountTypeName: string,
+    pubkey: string,
+    opts: { limit?: number; offset?: number } = {}
+  ): any[] {
+    const tableName = `acc_history_${this.idl.name}_${accountTypeName}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+    const limit = Math.min(opts.limit ?? 50, 200);
+    const offset = opts.offset ?? 0;
+    try {
+      return this.db.prepare(
+        `SELECT * FROM "${tableName}" WHERE pubkey = ? ORDER BY slot DESC LIMIT ? OFFSET ?`
+      ).all(pubkey, limit, offset);
+    } catch {
+      return [];
+    }
+  }
+
+  // ── Readiness check ───────────────────────────────────────────────────────
+
+  isReady(): boolean {
+    try {
+      this.db.prepare('SELECT 1').get();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // ── Program stats ─────────────────────────────────────────────────────────

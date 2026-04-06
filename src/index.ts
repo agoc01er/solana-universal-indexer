@@ -40,10 +40,9 @@ function loadIdl(): AnchorIdl {
 async function main() {
   logger.info('Starting Universal Solana Indexer', { version: '3.0.0' });
 
-  if (!config.PROGRAM_ID) {
-    logger.error('PROGRAM_ID environment variable is required');
-    process.exit(1);
-  }
+  // Validate configuration before anything else
+  const { validateConfig } = await import('./config');
+  validateConfig();
 
   const idl = loadIdl();
   logger.info('IDL loaded', {
@@ -124,11 +123,13 @@ async function main() {
       port: config.PORT,
       endpoints: {
         health: `/health`,
+        ready: `/ready`,
         metrics: `/metrics`,
         schema: `/schema`,
         stats: `/stats`,
         events: `/events`,
         instructions: `/instructions/:name`,
+        accountHistory: `/accounts/:type/:pubkey/history`,
       },
     });
   });
@@ -140,6 +141,19 @@ async function main() {
     logger.info('Batch complete');
     server.close();
     process.exit(0);
+  } else if (config.MODE === 'backfill_then_realtime') {
+    // Cold start: backfill from FROM_SLOT to chain tip, then switch to realtime
+    logger.info('Starting backfill_then_realtime mode', { fromSlot: config.FROM_SLOT });
+    const fromSlot = config.FROM_SLOT ?? repo.getLastProcessedSlot();
+    if (fromSlot > 0) {
+      logger.info('Backfilling from slot', { fromSlot });
+      await indexer.runBatch({ fromSlot });
+      logger.info('Backfill complete, switching to realtime');
+    }
+    indexer.runRealtime().catch(err => {
+      logger.error('Indexer fatal error', { error: err.message });
+      process.exit(1);
+    });
   } else {
     indexer.runRealtime().catch(err => {
       logger.error('Indexer fatal error', { error: err.message });

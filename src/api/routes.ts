@@ -15,13 +15,21 @@ export function createApp(
 
   // ── Health ─────────────────────────────────────────────────────────────────
   app.get('/health', (_req: Request, res: Response) => {
-    res.json({
-      status: 'ok',
+    const ready = repo.isReady();
+    res.status(ready ? 200 : 503).json({
+      status: ready ? 'ok' : 'degraded',
+      ready,
       program: idl.name,
       indexerRunning: indexer.isRunning,
       lastSlot: repo.getLastProcessedSlot(),
       uptime: process.uptime(),
     });
+  });
+
+  // ── Readiness probe (for K8s liveness/readiness) ──────────────────────────
+  app.get('/ready', (_req: Request, res: Response) => {
+    const ready = repo.isReady() && indexer.isRunning;
+    res.status(ready ? 200 : 503).json({ ready });
   });
 
   // ── Prometheus metrics ─────────────────────────────────────────────────────
@@ -95,18 +103,45 @@ export function createApp(
     }
   });
 
-  // ── Aggregation ────────────────────────────────────────────────────────────
-  // GET /stats/:instruction?group_by=hour|day|total&slot_from=&slot_to=
+  // ── Aggregation (extended: SUM/AVG/MIN/MAX) ────────────────────────────────
+  // GET /stats/:instruction?group_by=hour|day|total&op=count|sum|avg|min|max&field=arg_amount
   app.get('/stats/:instruction', (req: Request, res: Response) => {
     const ixDef = idl.instructions.find(ix => ix.name === req.params.instruction);
     if (!ixDef) return res.status(404).json({ error: `Unknown instruction: ${req.params.instruction}` });
 
     const groupBy = (req.query.group_by as string || 'total') as 'hour' | 'day' | 'total';
+    const op = (req.query.op as string || 'count') as 'count' | 'sum' | 'avg' | 'min' | 'max';
+    const field = req.query.field as string | undefined;
     const slotFrom = req.query.slot_from ? parseInt(req.query.slot_from as string) : undefined;
     const slotTo = req.query.slot_to ? parseInt(req.query.slot_to as string) : undefined;
 
+    // Validate op
+    if (!['count', 'sum', 'avg', 'min', 'max'].includes(op)) {
+      return res.status(400).json({ error: `Invalid op: ${op}. Use count, sum, avg, min, or max` });
+    }
+    if (op !== 'count' && !field) {
+      return res.status(400).json({ error: `Field is required for ${op} operation` });
+    }
+
     try {
-      res.json(repo.aggregate(req.params.instruction, groupBy, slotFrom, slotTo));
+      res.json(repo.aggregate(req.params.instruction, groupBy, slotFrom, slotTo, op, field));
+    } catch (err: any) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // ── Account history ────────────────────────────────────────────────────────
+  // GET /accounts/:type/:pubkey/history?limit=&offset=
+  app.get('/accounts/:type/:pubkey/history', (req: Request, res: Response) => {
+    const accDef = (idl.accounts ?? []).find(a => a.name === req.params.type);
+    if (!accDef) return res.status(404).json({ error: `Unknown account type: ${req.params.type}` });
+
+    const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+    const offset = req.query.offset ? parseInt(req.query.offset as string) : 0;
+
+    try {
+      const history = repo.queryAccountHistory(req.params.type, req.params.pubkey, { limit, offset });
+      res.json({ pubkey: req.params.pubkey, type: req.params.type, history });
     } catch (err: any) {
       res.status(400).json({ error: err.message });
     }

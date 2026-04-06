@@ -1,8 +1,8 @@
-# solana-universal-indexer
+# Universal Solana Indexer
 
-A universal Solana indexer that works with any Anchor program. Provide an IDL file, set a program ID, and the indexer handles everything: schema generation, transaction decoding, account state tracking, event parsing, and a REST API — without writing program-specific code.
+A production-ready Solana indexer that works with any Anchor program. Provide an IDL file, set a program ID, and the indexer handles everything: schema generation, transaction decoding, account state tracking, event parsing, and a REST API — without writing program-specific code.
 
-Supports two storage backends: **PostgreSQL** for production workloads and **SQLite** for lightweight deployments, edge environments, and CI pipelines where running a database server isn't practical.
+Supports **PostgreSQL** for production workloads and **SQLite** for lightweight deployments.
 
 ---
 
@@ -24,18 +24,20 @@ Solana RPC / WebSocket
                                         │
                                         ▼
                               Storage (PostgreSQL or SQLite)
-                              ├── ix_{program}_{instruction}   — one table per instruction
-                              ├── acc_{program}_{account}      — account state snapshots
-                              ├── {program}_events             — Anchor events
-                              ├── _indexer_state               — checkpoint / last slot
-                              └── _idl_versions                — IDL upgrade history
+                              ├── ix_{program}_{instruction}        — one table per instruction
+                              ├── acc_{program}_{account}           — account state snapshots
+                              ├── acc_history_{program}_{account}   — account change history
+                              ├── {program}_events                  — Anchor events
+                              ├── _indexer_state                    — checkpoint / last slot
+                              └── _idl_versions                     — IDL upgrade history
                                         │
                                         ▼
                               REST API (Express)
-                              ├── /health, /metrics, /schema
+                              ├── /health, /ready, /metrics, /schema
                               ├── /instructions/:name  (cursor pagination)
                               ├── /events
-                              ├── /stats/:instruction  (aggregation)
+                              ├── /stats/:instruction  (aggregation: COUNT/SUM/AVG/MIN/MAX)
+                              ├── /accounts/:type/:pubkey/history
                               └── /stats
 ```
 
@@ -46,40 +48,62 @@ Solana RPC / WebSocket
 **Core indexing**
 - IDL-driven schema — tables auto-generated from Anchor IDL on startup
 - Instruction decoding with Anchor 8-byte discriminator matching and BorshCoder
-- Account state snapshots via `getProgramAccounts` on startup, then real-time via `onProgramAccountChange`
+- Account state snapshots via `getProgramAccounts` + real-time via `onProgramAccountChange`
+- Account history — append-only log of every state change per pubkey
 - Anchor event decoding — `emit!()` events extracted from transaction logs
 - CPI inner instruction tracking with `cpi_depth` and `parent_ix_index`
 
 **Reliability**
-- Real-time mode with cold start: backfills from last checkpoint, then streams live
+- Three indexing modes: `realtime`, `batch`, and `backfill_then_realtime` (cold start)
 - Hybrid WebSocket + polling with gap detection — polls every 30s to catch missed transactions
 - Exponential backoff with full jitter on all RPC calls
 - Atomic writes — data and checkpoint committed in the same transaction
 - Graceful shutdown on `SIGINT`/`SIGTERM` with state flush
+- Config validation at startup with clear error messages
 
 **API**
 - Cursor-based pagination — stable under concurrent inserts, unlike `OFFSET`
 - Multi-parameter filtering on any indexed column
-- Aggregation by hour/day/total
+- Extended aggregation: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX` on numeric fields
+- Time-based grouping by hour/day using `block_time`
+- Readiness probe (`/ready`) for Kubernetes liveness checks
 - Prometheus `/metrics` — transaction throughput, RPC latency, slot lag
 - SQL injection protection — column name allowlist + parameterized queries
 
 **Infrastructure**
 - IDL Version Manager — detects on-chain IDL upgrades, migrates schema automatically
 - PostgreSQL for production, SQLite for lightweight/edge deployments
-- Docker Compose with one-command startup
+- Docker Compose with one-command startup (`docker compose up`)
 - Structured JSON logging
+
+---
+
+## Project structure
+
+```
+src/
+├── api/              Express routes and middleware
+├── config/           Environment configuration with validation
+├── database/         SQLite and PostgreSQL adapters, IDL migrations
+├── decoder/          Instruction, account, and event decoders
+├── idl/              IDL parsing, discriminator computation, schema SQL generation
+├── indexer/          Core indexing engine and account watcher
+├── observability/    Structured logger and Prometheus metrics
+├── utils/            Retry with exponential backoff and jitter
+├── __tests__/        Jest test suites
+└── index.ts          Entry point and orchestration
+```
 
 ---
 
 ## Quick start
 
-### Docker (PostgreSQL)
+### Docker (PostgreSQL — recommended)
 
 ```bash
 git clone https://github.com/agoc01er/solana-universal-indexer
 cd solana-universal-indexer
-cp .env.example .env        # set PROGRAM_ID and DATABASE_URL
+cp .env.example .env        # set PROGRAM_ID
 cp your-program.json idl.json
 docker compose up
 ```
@@ -87,8 +111,6 @@ docker compose up
 ### Docker (SQLite — no database server needed)
 
 ```bash
-cp .env.example .env
-# set PROGRAM_ID, set DB_TYPE=sqlite
 docker compose --profile sqlite up
 ```
 
@@ -123,11 +145,11 @@ DB_PATH=./indexer.db
 # API
 PORT=3000
 
-# Indexing
-MODE=realtime                         # realtime | batch
+# Indexing mode: realtime | batch | backfill_then_realtime
+MODE=realtime
 POLL_INTERVAL_MS=5000
 
-# Batch mode
+# Batch / backfill mode
 FROM_SLOT=
 TO_SLOT=
 
@@ -135,22 +157,27 @@ TO_SLOT=
 LOG_LEVEL=info
 ```
 
+The indexer validates configuration at startup and prints specific error messages for missing or invalid values.
+
 ---
 
 ## API
 
-### Health
+### Health & readiness
 
 ```
-GET /health
+GET /health    → 200 (ok) or 503 (degraded)
+GET /ready     → 200 if DB connected and indexer running, 503 otherwise
 ```
 
 ```json
 {
   "status": "ok",
+  "ready": true,
   "program": "my_program",
   "indexerRunning": true,
-  "lastSlot": 305000000
+  "lastSlot": 305000000,
+  "uptime": 3600.5
 }
 ```
 
@@ -160,7 +187,7 @@ GET /health
 GET /metrics
 ```
 
-Returns metrics in Prometheus text format: transaction counts, RPC latency histograms, slot lag.
+Returns metrics in Prometheus text format: transaction counts, RPC latency histograms, slot lag, events decoded, instructions indexed.
 
 ### IDL schema info
 
@@ -173,17 +200,16 @@ Returns the loaded IDL structure: instructions, accounts, events.
 ### Query instructions
 
 ```
-GET /instructions/:name
+GET /instructions/:name?cursor=&limit=&slot_from=&slot_to=&account_X=&arg_X=
 ```
 
-Query parameters:
 - `cursor` — opaque cursor from previous response
 - `limit` — max rows (default 50, max 200)
 - `slot_from`, `slot_to` — slot range filter
 - Any indexed column name for equality filtering
 
 ```bash
-# First page of swaps
+# First page
 curl "http://localhost:3000/instructions/swap?limit=50"
 
 # Filter by signer
@@ -209,19 +235,33 @@ Response:
 GET /events?name=SwapExecuted&slot_from=300000000&limit=50
 ```
 
-### Aggregation
+### Aggregation (extended)
 
 ```
-GET /stats/:instruction?group_by=hour|day|total&slot_from=...&slot_to=...
+GET /stats/:instruction?group_by=hour|day|total&op=count|sum|avg|min|max&field=arg_amount
 ```
 
 ```bash
-# Total calls to swap instruction
+# Total calls
 curl http://localhost:3000/stats/swap
 
-# Hourly breakdown
+# Hourly count
 curl "http://localhost:3000/stats/swap?group_by=hour"
+
+# Sum of amounts per day
+curl "http://localhost:3000/stats/swap?group_by=day&op=sum&field=arg_amount"
+
+# Average amount
+curl "http://localhost:3000/stats/swap?group_by=total&op=avg&field=arg_amount"
 ```
+
+### Account history
+
+```
+GET /accounts/:type/:pubkey/history?limit=50&offset=0
+```
+
+Returns the full history of state changes for a specific account, ordered by slot descending.
 
 ### Program overview
 
@@ -248,11 +288,21 @@ POST /index/accounts
 
 ---
 
+## Indexing modes
+
+| Mode | Behavior |
+|------|----------|
+| `realtime` | Streams transactions via WebSocket + polling. Default mode. |
+| `batch` | Indexes a specific slot range, then exits. Good for backfills. |
+| `backfill_then_realtime` | Catches up from `FROM_SLOT` (or last checkpoint) to chain tip, then switches to realtime. Ideal for cold starts. |
+
+---
+
 ## Storage backends
 
-**PostgreSQL** is the default for production. It handles concurrent writes, scales to hundreds of millions of rows, and supports full connection pooling.
+**PostgreSQL** is the default for production. Handles concurrent writes, scales to hundreds of millions of rows, and supports full connection pooling.
 
-**SQLite** is available for edge deployments, single-node setups, or any environment where running a separate database process isn't practical. It uses WAL mode for concurrent reads. Set `DB_TYPE=sqlite` and optionally `DB_PATH`.
+**SQLite** is available for edge deployments, single-node setups, or any environment where running a separate database process isn't practical. Uses WAL mode for concurrent reads. Set `DB_TYPE=sqlite`.
 
 Both backends implement the same interface. Switching is a single environment variable.
 
@@ -276,16 +326,39 @@ Programs upgrade. Without tracking IDL versions, historical transactions decoded
 
 Different deployment contexts have different requirements. A production indexer tracking a high-volume DEX needs PostgreSQL. An indexer running on a VPS to track a small protocol, or in a CI pipeline for integration tests, benefits from SQLite's zero-configuration setup.
 
-**Exponential backoff with full jitter**
+**Why exponential backoff with full jitter**
 
-Pure exponential backoff causes synchronized retry storms when multiple requests fail at the same time. Full jitter (`sleep = random(0, cap)`) distributes retries evenly, preventing cascading overload on RPC endpoints after rate limit events.
+Pure exponential backoff causes synchronized retry storms when multiple requests fail at the same time. Full jitter (`sleep = random(0, cap)`) distributes retries evenly, preventing cascading overload on RPC endpoints.
+
+**Why append-only account history**
+
+Upsert-only snapshots lose the ability to track how account state evolved over time. The append-only history table (`acc_history_*`) records every state change, enabling point-in-time queries and audit trails.
 
 ---
 
 ## Running tests
 
 ```bash
-npx ts-node src/__tests__/run-tests.ts
+npm test
 ```
 
-Covers: IDL discriminator computation, Borsh decoding (u8–u128, strings, options, arrays), schema generation, exponential backoff, Anchor event decoding, cursor pagination, SQL injection protection.
+Test suites cover:
+- **IDL**: discriminator computation, Borsh decoding (u8–u128, strings, options, arrays), schema generation
+- **Database**: CRUD operations, cursor pagination, slot filtering, SQL injection protection, deduplication
+- **Aggregation**: COUNT, SUM, AVG, MIN, MAX on numeric fields, time-based grouping, unsafe field rejection
+- **Account history**: append-only inserts, query ordering, limit/offset
+- **Events**: Anchor event decoding, discriminator matching, malformed data handling
+- **Retry**: exponential backoff, max attempts, jitter
+- **Metrics**: counter/gauge/histogram rendering, Prometheus text format validation
+- **Config**: validation of required fields, invalid modes, port ranges
+
+---
+
+## Known limitations
+
+- **Single program per instance** — each indexer instance tracks one program ID. For multi-program indexing, run multiple instances.
+- **No Geyser/Yellowstone support** — relies on standard RPC endpoints. Geyser plugins would improve throughput for high-volume programs but add infrastructure complexity.
+- **Account history tables grow unbounded** — the append-only `acc_history_*` tables need manual cleanup or TTL policies for long-running deployments.
+- **Manual Borsh decoder is partial** — nested custom types (`defined` in IDL) fall back to null. The BorshCoder from `@coral-xyz/anchor` handles these correctly when available.
+- **PostgreSQL adapter uses OFFSET pagination** — the cursor-based pagination is currently SQLite-only. The PG adapter falls back to OFFSET/LIMIT. This is a known inconsistency that should be addressed.
+- **On-chain IDL fetch without decompression** — the `fetchFromChain` method doesn't handle zlib-compressed IDL data stored on-chain.

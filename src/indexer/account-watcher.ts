@@ -111,6 +111,8 @@ export class AccountWatcher {
       if (!result) continue;
 
       this.repo.upsertAccountSnapshot(accountTypeName, pubkey.toString(), slot, result.data);
+      // Also record in append-only history
+      try { this.repo.insertAccountHistory(accountTypeName, pubkey.toString(), slot, result.data); } catch { /* history table may not exist yet */ }
       decoded++;
     }
 
@@ -157,6 +159,8 @@ export class AccountWatcher {
               context.slot,
               result.data
             );
+            // Append to history log
+            try { this.repo.insertAccountHistory(accDef.name, accountId.toString(), context.slot, result.data); } catch { /* ignore */ }
 
             logger.debug('Account state updated via WS', {
               type: accDef.name,

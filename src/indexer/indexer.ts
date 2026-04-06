@@ -31,7 +31,8 @@ export interface BatchOptions {
 
 export class SolanaIndexer {
   private connection: Connection;
-  private wsConnection: Connection;
+  private _wsConnection: Connection | null = null;
+  private wsUrl: string;
   private ixDecoder: InstructionDecoder;
   private accDecoder: AccountDecoder;
   private eventDecoder: EventDecoder;
@@ -49,11 +50,10 @@ export class SolanaIndexer {
     rpcUrl?: string
   ) {
     this.connection = new Connection(rpcUrl ?? config.RPC_URL, 'confirmed');
-    const wsUrl = config.WS_URL ||
-      (rpcUrl ?? config.RPC_URL)
-        .replace('https://', 'wss://')
-        .replace('http://', 'ws://');
-    this.wsConnection = new Connection(wsUrl, 'confirmed');
+    const effectiveRpc = rpcUrl ?? config.RPC_URL;
+    this.wsUrl = config.WS_URL ||
+      effectiveRpc.replace(/^https:\/\//, 'wss://').replace(/^http:\/\//, 'ws://');
+    // wsConnection is created lazily on first use to avoid Windows uv_async crash
 
     this.ixDecoder = new InstructionDecoder(idl);
     this.accDecoder = new AccountDecoder(idl);
@@ -65,6 +65,13 @@ export class SolanaIndexer {
       instructions: idl.instructions.map(ix => ix.name),
       hasEvents: this.eventDecoder.hasEvents,
     });
+  }
+
+  private get wsConnection(): Connection {
+    if (!this._wsConnection) {
+      this._wsConnection = new Connection(this.wsUrl, 'confirmed');
+    }
+    return this._wsConnection;
   }
 
   // ─── RPC wrappers with metrics ────────────────────────────────────────────

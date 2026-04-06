@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import { PublicKey } from '@solana/web3.js';
+import { Connection, PublicKey } from '@solana/web3.js';
 import { AnchorIdl } from './idl/parser';
 import { createDb } from './database/sqlite';
 import { SolanaIndexer } from './indexer/indexer';
@@ -9,7 +9,20 @@ import { IdlVersionManager } from './database/migrations';
 import { config, validateConfig } from './config';
 import { logger } from './observability/logger';
 
-function loadIdl(): AnchorIdl {
+async function loadIdl(): Promise<AnchorIdl> {
+  // 1. Try on-chain IDL if IDL_ACCOUNT is set
+  if (config.IDL_ACCOUNT) {
+    logger.info('Fetching IDL from on-chain account', { account: config.IDL_ACCOUNT });
+    const connection = new Connection(config.RPC_URL);
+    const onChainIdl = await IdlVersionManager.fetchFromChain(config.IDL_ACCOUNT, connection);
+    if (onChainIdl) {
+      logger.info('On-chain IDL loaded', { program: onChainIdl.name, instructions: onChainIdl.instructions.length });
+      return onChainIdl;
+    }
+    logger.warn('On-chain IDL fetch failed, falling back to file', { account: config.IDL_ACCOUNT });
+  }
+
+  // 2. Try IDL file
   const idlPath = config.IDL_PATH;
   if (!fs.existsSync(idlPath)) {
     logger.warn('No IDL file found, using built-in example IDL', { idlPath });
@@ -43,7 +56,7 @@ async function main() {
   // Validate configuration before anything else
   validateConfig();
 
-  const idl = loadIdl();
+  const idl = await loadIdl();
   logger.info('IDL loaded', {
     program: idl.name,
     instructions: idl.instructions.length,

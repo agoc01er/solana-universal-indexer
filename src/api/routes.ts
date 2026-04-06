@@ -4,6 +4,7 @@ import { IndexerRepository } from '../database/sqlite';
 import { AnchorIdl } from '../idl/parser';
 import { metrics } from '../observability/metrics';
 import { logger } from '../observability/logger';
+import { createDashboardRouter } from './dashboard';
 
 export function createApp(
   repo: IndexerRepository,
@@ -12,6 +13,7 @@ export function createApp(
 ) {
   const app = express();
   app.use(express.json());
+  app.use(createDashboardRouter());
 
   // ── Health ─────────────────────────────────────────────────────────────────
   app.get('/health', (_req: Request, res: Response) => {

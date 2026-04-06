@@ -9,6 +9,7 @@ export const config = {
   // Program
   PROGRAM_ID: process.env.PROGRAM_ID || '',
   IDL_PATH: process.env.IDL_PATH || './idl.json',
+  IDL_ACCOUNT: process.env.IDL_ACCOUNT || '', // optional: fetch IDL from on-chain Anchor account
 
   // API
   PORT: parseInt(process.env.PORT || '3000'),

@@ -6,7 +6,7 @@ import { SolanaIndexer } from './indexer/indexer';
 import { createApp } from './api/routes';
 import { AccountWatcher } from './indexer/account-watcher';
 import { IdlVersionManager } from './database/migrations';
-import { config } from './config';
+import { config, validateConfig } from './config';
 import { logger } from './observability/logger';
 
 function loadIdl(): AnchorIdl {
@@ -41,7 +41,6 @@ async function main() {
   logger.info('Starting Universal Solana Indexer', { version: '3.0.0' });
 
   // Validate configuration before anything else
-  const { validateConfig } = await import('./config');
   validateConfig();
 
   const idl = loadIdl();

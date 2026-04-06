@@ -344,6 +344,14 @@ export class IndexerRepository {
     }
   }
 
+  // ── Graceful shutdown ─────────────────────────────────────────────────────
+
+  close(): void {
+    try {
+      this.db.close();
+    } catch { /* already closed */ }
+  }
+
   // ── Program stats ─────────────────────────────────────────────────────────
 
   getProgramStats(): Record<string, any> {

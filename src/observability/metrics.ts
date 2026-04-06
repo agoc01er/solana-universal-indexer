@@ -92,10 +92,9 @@ class MetricsRegistry {
     for (const [, hist] of this.histograms) {
       lines.push(`# HELP ${hist.name} ${hist.help}`);
       lines.push(`# TYPE ${hist.name} histogram`);
-      let cumulativeCount = 0;
+      // hist.counts[i] is already cumulative (counts observations <= buckets[i])
       for (let i = 0; i < hist.buckets.length; i++) {
-        cumulativeCount += hist.counts[i];
-        lines.push(`${hist.name}_bucket{le="${hist.buckets[i]}"} ${cumulativeCount}`);
+        lines.push(`${hist.name}_bucket{le="${hist.buckets[i]}"} ${hist.counts[i]}`);
       }
       lines.push(`${hist.name}_bucket{le="+Inf"} ${hist.total}`);
       lines.push(`${hist.name}_sum ${hist.sum}`);

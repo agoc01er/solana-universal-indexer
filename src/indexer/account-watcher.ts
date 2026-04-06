@@ -86,19 +86,19 @@ export class AccountWatcher {
   }
 
   private async syncAccountType(accountTypeName: string, slot: number): Promise<number> {
-    // Get discriminator for this account type
-    const { computeDiscriminator } = await import('../idl/parser');
     // Anchor account discriminator: sha256("account:<AccountName>")[0..8]
     const crypto = require('crypto');
-    const disc = crypto.createHash('sha256')
+    const disc: Buffer = crypto.createHash('sha256')
       .update(`account:${accountTypeName}`)
       .digest()
-      .slice(0, 8) as Buffer;
+      .slice(0, 8);
 
+    // Solana RPC memcmp requires base58-encoded bytes
+    const bs58 = require('bs58');
     const accounts = await withRetry(
       () => this.connection.getProgramAccounts(this.programId, {
         filters: [
-          { memcmp: { offset: 0, bytes: disc.toString('base64') } },
+          { memcmp: { offset: 0, bytes: bs58.encode(disc) } },
         ],
       }),
       { maxAttempts: 3, initialDelayMs: 1000 }
